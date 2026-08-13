@@ -155,10 +155,10 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     authToken: string,
     previewUploadV2: boolean,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
-    const { isH264, isHDR, bitrate } =
+    const { isH264, isAAC, isHDR, bitrate } =
         await detectVideoCharacteristics(inputFilePath);
 
-    log.debugString(JSON.stringify({ isH264, isHDR, bitrate }));
+    log.debugString(JSON.stringify({ isH264, isAAC, isHDR, bitrate }));
 
     // Never skip HEVC: it can be audio-only on Linux, and Chromium can ignore
     // iPhone HEVC+HDR rotation metadata.
@@ -171,8 +171,13 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         }
     }
 
-    // Re-encoding is by far the dominant cost of generating the stream.
-    const reencodeVideo = !(isH264 && bitrate && bitrate <= 4000 * 1000);
+    // Re-encoding is by far the dominant cost of generating the stream, so
+    // remux SDR H.264 regardless of its bitrate. HDR still has to be converted
+    // to BT.709 SDR, which requires a re-encode.
+    const reencodeVideo = !(isH264 && !isHDR);
+    // AAC-LC muxes directly into the segments; anything else (including an
+    // audio stream we could not identify) is transcoded for compatibility.
+    const copyAudio = isAAC;
     // Avoid shrinking video whose bitrate is already modest.
     const rescaleVideo = !(bitrate && bitrate <= 2000 * 1000);
     // HDR needs BT.709 tonemapping; applying it to SDR reduces brightness.
@@ -232,7 +237,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         reencodeVideo
             ? ["-c:v", "libx264", "-maxrate", "2000k", "-bufsize", "4000k"]
             : ["-c:v", "copy"],
-        ["-c:a", "aac"],
+        ["-c:a", copyAudio ? "copy" : "aac"],
         ["-f", "hls"],
         ["-hls_key_info_file", keyInfoPath],
         ["-hls_list_size", "0"],
@@ -303,6 +308,8 @@ const videoStreamLineRegex = /Stream #.+: Video:(.+)\r?\n/;
 
 const videoStreamLinesRegex = /Stream #.+: Video:(.+)\r?\n/g;
 
+const audioStreamLinesRegex = /Stream #.+: Audio:(.+)\r?\n/g;
+
 const videoBitrateRegex = / ([1-9]\d*) kb\/s/;
 
 // Leading nonzero digits avoid matching hexadecimal constants in stream info.
@@ -310,6 +317,7 @@ const videoDimensionsRegex = / ([1-9]\d*)x([1-9]\d*)/;
 
 interface VideoCharacteristics {
     isH264: boolean;
+    isAAC: boolean;
     isHDR: boolean;
     bitrate: number | undefined;
 }
@@ -322,9 +330,22 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
 
     const res: VideoCharacteristics = {
         isH264: false,
+        isAAC: false,
         isHDR: false,
         bitrate: undefined,
     };
+
+    // FFmpeg selects the "best" audio stream, not necessarily the first one,
+    // so only claim AAC when every candidate is AAC-LC. Other profiles
+    // (HE-AAC, xHE-AAC) are printed as e.g. "aac (HE-AAC)" and are not
+    // dependably playable, so they are excluded too.
+    const audioStreamLines = Array.from(
+        videoInfo.matchAll(audioStreamLinesRegex),
+    ).map((m) => m[1]!.trim());
+    res.isAAC =
+        audioStreamLines.length > 0 &&
+        audioStreamLines.every((line) => line.startsWith("aac (LC)"));
+
     if (!videoStreamLine) return res;
 
     res.isH264 = videoStreamLine.startsWith("h264 ");
