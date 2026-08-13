@@ -7,9 +7,6 @@ on:
         branches:
             - "release/photos-desktop-v*"
     workflow_dispatch:
-    schedule:
-        # Weekdays at ~6:45 AM IST
-        - cron: "15 1 * * 1-5"
 
 permissions:
     contents: read
@@ -77,17 +74,15 @@ jobs:
         needs: build-metadata
         if: needs.build-metadata.outputs.should_build == 'true'
         runs-on: ${{ matrix.os }}
-        environment:
-            name: production
 
         strategy:
             matrix:
-                os: [macos-latest, ubuntu-latest, windows-latest]
+                # Add macos-latest / ubuntu-latest back to build those too; the
+                # steps guarded on the runner OS below are kept for that reason.
+                os: [windows-latest]
 
         env:
             RELEASE_TAG: ${{ needs.build-metadata.outputs.release_tag }}
-            IS_RC: ${{ startsWith(github.ref_name, 'release/') }}
-            RELEASE_BODY: ${{ needs.build-metadata.outputs.release_body }}
 
         defaults:
             run:
@@ -138,21 +133,13 @@ jobs:
             - name: Build
               run: npm run build:ci
 
-            - name: Mint nightly token
-              id: nightly_token
-              uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-              with:
-                  client-id: ${{ secrets.ENTE_CI_GH_CLIENT_ID }}
-                  private-key: ${{ secrets.ENTE_CI_GH_APP_PRIVATE_KEY }}
-                  repositories: nightly,photos-desktop
-                  permission-contents: write
-
-            - name: Publish
+            - name: Package
               shell: bash
               run: |
                   if [ "${RUNNER_OS}" = "macOS" ]; then
-                      export CSC_LINK="${MAC_OS_CERTIFICATE}"
-                      export CSC_KEY_PASSWORD="${MAC_OS_CERTIFICATE_PASSWORD}"
+                      # There is no Apple certificate, so tell electron-builder
+                      # to skip signing rather than fail looking for an identity.
+                      export CSC_IDENTITY_AUTO_DISCOVERY=false
                   elif [ "${RUNNER_OS}" = "Linux" ]; then
                       export TARGET_CC=clang
                       export TARGET_CXX=clang++
@@ -160,40 +147,27 @@ jobs:
 
                   platform=${{ startsWith(matrix.os, 'macos') && 'mac' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }}
 
-                  if [ "${IS_RC}" = "true" ]; then
-                      npm exec -- electron-builder --$platform --publish always "-c.releaseInfo.releaseNotes=${RELEASE_BODY}"
-                  else
-                      npm exec -- electron-builder --$platform --publish never
-                  fi
+                  npm exec -- electron-builder --$platform --publish never
               env:
-                  GH_TOKEN: ${{ steps.nightly_token.outputs.token }}
-                  MAC_OS_CERTIFICATE: ${{ secrets.MAC_OS_CERTIFICATE }}
-                  MAC_OS_CERTIFICATE_PASSWORD: ${{ secrets.MAC_OS_CERTIFICATE_PASSWORD }}
-                  APPLE_ID: ${{ secrets.APPLE_ID }}
-                  APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-                  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-                  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-                  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-                  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-                  # Allow rebuilds to keep updating the rolling RC draft.
-                  EP_GH_IGNORE_TIME: true
                   # Workaround recommended in
                   # https://github.com/electron-userland/electron-builder/issues/3179
                   USE_HARD_LINKS: false
 
-            - name: Upload to nightly
-              uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
+            - name: Upload artifacts
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               with:
-                  repo: nightly
-                  token: ${{ steps.nightly_token.outputs.token }}
-                  tag: ${{ env.RELEASE_TAG }}
-                  name: ${{ env.RELEASE_TAG }}
-                  body: ${{ env.RELEASE_BODY }}
-                  artifacts: "desktop/dist/ente-*.@(exe|dmg|AppImage|deb|rpm|pacman)"
-                  prerelease: true
-                  makeLatest: false
-                  allowUpdates: true
-                  updateOnlyUnreleased: true
+                  name: ${{ env.RELEASE_TAG }}-${{ matrix.os }}
+                  # Unlike the shell globs above, this is matched by
+                  # @actions/glob, which does not support extglob alternation.
+                  path: |
+                      desktop/dist/ente-*.exe
+                      desktop/dist/ente-*.dmg
+                      desktop/dist/ente-*.AppImage
+                      desktop/dist/ente-*.deb
+                      desktop/dist/ente-*.rpm
+                      desktop/dist/ente-*.pacman
+                  if-no-files-found: error
+                  retention-days: 30
 
     finish-build:
         needs: [build-metadata, build]
@@ -215,13 +189,3 @@ jobs:
               run: |
                   git tag --force "${RELEASE_TAG}" "${COMMIT_SHA}"
                   git push --force origin "refs/tags/${RELEASE_TAG}"
-
-            - name: Notify Discord
-              if: github.event_name != 'schedule' || needs.build-metadata.outputs.has_new_changes == 'true'
-              continue-on-error: true
-              env:
-                  DISCORD_WEBHOOK: ${{ secrets.DISCORD_INTERNAL_RELEASE_WEBHOOK }}
-                  RELEASE_TITLE: ${{ needs.build-metadata.outputs.release_title }}
-                  RELEASE_BODY_GROUPED: ${{ needs.build-metadata.outputs.release_body_grouped }}
-                  RELEASE_TAG: ${{ needs.build-metadata.outputs.release_tag }}
-              run: node .github/scripts/release-notify.mjs photos-desktop "${RELEASE_TAG}"
