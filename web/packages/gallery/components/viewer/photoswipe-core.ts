@@ -94,6 +94,14 @@ export const moreMenuID = "ente-pswp-more-menu";
 
 const fullscreenControlsAutoHideDelayMS = 3000;
 
+/**
+ * The video only fullscreen entry point that iOS Safari provides in lieu of
+ * the standard element fullscreen API.
+ */
+type NativeFullscreenVideo = HTMLVideoElement & {
+    webkitEnterFullscreen?: () => void;
+};
+
 export class FileViewerPhotoSwipe<
     T extends FileViewerPhotoSwipeAnnotatedFile =
         FileViewerPhotoSwipeAnnotatedFile,
@@ -403,20 +411,92 @@ export class FileViewerPhotoSwipe<
             setTimeout(() => _updateVideoControlsAndPlayback(itemData), 0);
         };
 
+        // Only a video element going fullscreen gets the platform's
+        // rotate-to-landscape handling; a fullscreen div stays portrait. So on
+        // touch devices hand the video to the browser's own fullscreen player
+        // instead, trading our overlay controls for a correctly oriented video.
+        const shouldUseNativeVideoFullscreen = () =>
+            window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+
+        // hls-video wraps the real video in its shadow root, and fullscreening
+        // the wrapper would put us back to fullscreening a non-video element.
+        const nativeVideoElement = (element: Element | null | undefined) =>
+            (element as { nativeEl?: HTMLVideoElement } | null)?.nativeEl ??
+            (element instanceof HTMLVideoElement ? element : undefined);
+
+        const currentNativeVideoElement = () =>
+            nativeVideoElement(
+                queryVideoElement(pswp.currSlide?.content.element) ??
+                    videoVideoEl,
+            );
+
+        const enterNativeVideoFullscreen = (video: HTMLVideoElement) => {
+            // Our controls are not painted inside the native fullscreen
+            // player, so let the browser show its own for the duration.
+            const hadControls = video.hasAttribute("controls");
+            video.setAttribute("controls", "");
+
+            const untilExit = new AbortController();
+            const { signal } = untilExit;
+
+            const restoreControls = () => {
+                if (!hadControls) video.removeAttribute("controls");
+                untilExit.abort();
+            };
+
+            // iOS fires webkitendfullscreen instead of fullscreenchange.
+            video.addEventListener("webkitendfullscreen", restoreControls, {
+                signal,
+            });
+            document.addEventListener(
+                "fullscreenchange",
+                () => {
+                    if (!document.fullscreenElement) restoreControls();
+                },
+                { signal },
+            );
+
+            // iOS Safari on iPhone has no element fullscreen, only the
+            // video-specific prefixed entry point.
+            const enterPresentationFullscreen = () => {
+                const { webkitEnterFullscreen } =
+                    video as NativeFullscreenVideo;
+                if (!webkitEnterFullscreen) {
+                    restoreControls();
+                    return;
+                }
+                webkitEnterFullscreen.call(video);
+            };
+
+            if (!(video as Partial<HTMLVideoElement>).requestFullscreen) {
+                enterPresentationFullscreen();
+                return;
+            }
+
+            video.requestFullscreen().catch((e: unknown) => {
+                log.debug(() => ["Native video fullscreen was refused", e]);
+                enterPresentationFullscreen();
+            });
+        };
+
         const handleFullscreenButtonClick = (e: Event) => {
             e.stopPropagation();
             e.preventDefault();
             if (document.fullscreenElement) {
                 void document.exitFullscreen();
-            } else {
-                // Fullscreen the document so PhotoSwipe controls remain accessible.
-                void document.body.requestFullscreen();
-                pswp.element?.classList.add("pswp--video-fullscreen");
-                document.addEventListener(
-                    "mousemove",
-                    handleMouseMoveInFullscreen,
-                );
+                return;
             }
+
+            const video = currentNativeVideoElement();
+            if (video && shouldUseNativeVideoFullscreen()) {
+                enterNativeVideoFullscreen(video);
+                return;
+            }
+
+            // Fullscreen the document so PhotoSwipe controls remain accessible.
+            void document.body.requestFullscreen();
+            pswp.element?.classList.add("pswp--video-fullscreen");
+            document.addEventListener("mousemove", handleMouseMoveInFullscreen);
         };
 
         let fullscreenUIControlsHideTimer:
