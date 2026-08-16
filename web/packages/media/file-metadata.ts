@@ -81,6 +81,10 @@ export interface FilePublicMagicMetadataData {
     // Streaming version. A client that decides a video does not need an HLS
     // stream sets this to 1, and other clients then skip processing it.
     sv?: number;
+    // Stream only. Set to 1 once the original of a video has been deleted
+    // because its HLS stream is a lossless copy of it. Such a video can only be
+    // played or exported via its stream; there is no original left to fetch.
+    so?: number;
 }
 
 export const FilePublicMagicMetadataData = z.looseObject({
@@ -101,6 +105,7 @@ export const FilePublicMagicMetadataData = z.looseObject({
     lat: z.number().nullish().transform(nullToUndefined),
     long: z.number().nullish().transform(nullToUndefined),
     sv: z.number().nullish().transform(nullToUndefined),
+    so: z.number().nullish().transform(nullToUndefined),
 });
 
 export const metadataHash = (metadata: FileMetadata) => {
@@ -125,6 +130,17 @@ export const isArchivedFile = (file: EnteFile) =>
 
 export const fileFileName = (file: EnteFile) =>
     file.pubMagicMetadata?.data.editedName ?? file.metadata.title;
+
+/**
+ * Return true if the original of {@link file} has been deleted because its HLS
+ * stream is a lossless copy of it, leaving that stream as the only copy.
+ *
+ * Such files must not be routed through any code path that fetches the
+ * original: there is nothing at the other end of it.
+ */
+export const isStreamOnlyVideo = (file: EnteFile) =>
+    file.metadata.fileType == FileType.video &&
+    file.pubMagicMetadata?.data.so == 1;
 
 export const fileCreationTime = (file: EnteFile) =>
     file.pubMagicMetadata?.data.editedTime ?? file.metadata.creationTime;

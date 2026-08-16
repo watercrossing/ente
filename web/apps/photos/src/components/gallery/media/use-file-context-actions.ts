@@ -60,6 +60,7 @@ export const useFileContextActions = ({
             switch (action) {
                 case "sendLink":
                 case "download":
+                case "downloadStream":
                 case "favorite":
                 case "unfavorite":
                 case "archive":
@@ -69,6 +70,22 @@ export const useFileContextActions = ({
                     void createFileOpHandler(action, {
                         suppressSelectionBar,
                     })();
+                    break;
+                case "dropOriginal":
+                    // Unlike the automatic drop after conversion, which only
+                    // runs when the stream is a lossless copy, this discards
+                    // the original whatever the stream turned out to be.
+                    showMiniDialog({
+                        title: t("delete_original_title"),
+                        message: t("delete_original_message"),
+                        continue: {
+                            text: t("delete"),
+                            color: "critical",
+                            action: createFileOpHandler("dropOriginal", {
+                                suppressSelectionBar,
+                            }),
+                        },
+                    });
                     break;
                 case "trash":
                     handleDeleteFiles(suppressSelectionBar);
