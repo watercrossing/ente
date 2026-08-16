@@ -1,29 +1,45 @@
 name: "Build (Photos desktop)"
 
-# See .github/docs/app-release.md
+# Builds this fork's Photos desktop installers and publishes them as a release
+# here. Upstream's release process in .github/docs/app-release.md does not apply:
+# it publishes to ente/nightly and ente/photos-desktop, and it versions from
+# desktop/package.json. See the "Prepare release" step for what we do instead.
 
 on:
     push:
         branches:
-            - "release/photos-desktop-v*"
+            - main
+        paths:
+            - "desktop/**"
+            # The renderer is web/apps/photos, exported from the whole web
+            # workspace, and rust/ supplies both the napi codegen and the
+            # native modules the app loads — a change to either ships in the
+            # installer, so both belong here.
+            - "web/**"
+            - "rust/**"
+            - ".github/workflows/photos-desktop-build.yml"
+            - ".github/scripts/photos-desktop-*.mjs"
+            - ".github/scripts/release-notes.mjs"
     workflow_dispatch:
-    schedule:
-        # Weekdays at ~6:45 AM IST
-        - cron: "15 1 * * 1-5"
 
 permissions:
     contents: read
 
 concurrency:
     group: photos-desktop-build
-    cancel-in-progress: false
+    # A build takes ~40 minutes, and only the tip of main is worth an
+    # installer: a push that lands while one is running supersedes it rather
+    # than queueing a second release behind it. Serializing instead would be
+    # correct too — build-metadata numbers the release from the tags already
+    # published, so a queued run picks up the next build number — but it spends
+    # a runner-hour on a commit nobody will install.
+    cancel-in-progress: true
 
 jobs:
     build-metadata:
         runs-on: ubuntu-latest
 
         outputs:
-            should_build: ${{ steps.prepare.outputs.should_build }}
             commit_sha: ${{ steps.prepare.outputs.commit_sha }}
             release_version: ${{ steps.prepare.outputs.release_version }}
             release_tag: ${{ steps.prepare.outputs.release_tag }}
@@ -36,7 +52,11 @@ jobs:
             - name: Checkout
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
-                  ref: ${{ github.ref_name }}
+                  # The pushed commit, not the branch tip: builds start on every
+                  # push now, so main can move on between the push and the
+                  # runner picking the job up, and the release title and tag
+                  # would then name a commit this run did not build.
+                  ref: ${{ github.sha }}
 
             - name: Prepare release
               id: prepare
@@ -44,50 +64,61 @@ jobs:
               run: |
                   set -euo pipefail
 
-                  if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]] && git ls-remote --exit-code --heads origin 'release/photos-desktop-v*' >/dev/null 2>&1; then
-                      echo "Active Photos desktop release branch found; skipping scheduled nightly"
-                      echo "should_build=false" >> "${GITHUB_OUTPUT}"
-                      exit 0
+                  # This fork's builds get their own CalVer line, YYYY.MMDD.N,
+                  # instead of upstream's version. Upstream's number sits in
+                  # desktop/package.json as "<next>-beta" for weeks at a time, so
+                  # it cannot identify a build; and since desktop/electron-builder.yml
+                  # points the update feed at this repo, the version string is what
+                  # electron-updater compares. A prerelease suffix would also flip
+                  # it into its allowPrerelease path, which walks the releases feed
+                  # and skips any release whose tag is not valid semver. A plain
+                  # stable version keeps it on GitHub's "latest release" pointer,
+                  # where only the version inside latest.yml matters.
+                  #
+                  # The month is unpadded (2026.816.1, not 2026.0816.1) because
+                  # semver rejects leading zeros in a numeric component. Ordering
+                  # still holds: 2026.101.1 < 2026.816.1 < 2026.1231.1 < 2027.101.1.
+                  base="$(date -u +%Y.%-m%d)"
+
+                  # Tags are prefixed with wc- so that fetching upstream's tags
+                  # never collides with ours.
+                  tags="$(git ls-remote --tags --refs origin 'wc-photos-desktop-v*' | sed 's#.*refs/tags/##' | sort -V)"
+                  previous_tag="$(printf '%s\n' "${tags}" | tail -n 1)"
+                  built_today="$(printf '%s\n' "${tags}" | sed -n "s/^wc-photos-desktop-v${base}\.\([0-9]\{1,\}\)$/\1/p" | sort -n | tail -n 1)"
+
+                  release_version="${base}.$(( ${built_today:-0} + 1 ))"
+                  release_tag="wc-photos-desktop-v${release_version}"
+
+                  upstream_version="$(node .github/scripts/photos-desktop-version.mjs get)"
+                  release_title="🖥️ Photos desktop ${release_version} (upstream ${upstream_version} @ $(git rev-parse --short HEAD))"
+
+                  # Each build gets its own tag, so diff the changesets against
+                  # our previous release to list what is new since it.
+                  if [ -n "${previous_tag}" ]; then
+                      git fetch --force --depth=1 --no-tags origin "refs/tags/${previous_tag}:refs/tags/${previous_tag}" || previous_tag=""
                   fi
 
-                  release_version="$(node .github/scripts/photos-desktop-version.mjs get)"
-
-                  if [[ "${GITHUB_REF_NAME}" == release/photos-desktop-v* ]]; then
-                      if [[ "${GITHUB_REF_NAME}" != "release/photos-desktop-v${release_version}" ]]; then
-                          echo "::error::Branch ${GITHUB_REF_NAME} does not match desktop version ${release_version}"
-                          exit 1
-                      fi
-                      release_tag="photos-desktop-v${release_version}-rc"
-                      release_title="🖥️ Photos desktop release candidate - ${release_version}"
-                  else
-                      release_tag="photos-desktop-v${release_version}"
-                      release_title="🖥️ Photos desktop nightly - ${release_version}"
-                  fi
-
-                  git fetch --force --depth=1 --no-tags origin "refs/tags/${release_tag}:refs/tags/${release_tag}" || true
-
-                  echo "should_build=true" >> "${GITHUB_OUTPUT}"
                   echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
                   echo "release_version=${release_version}" >> "${GITHUB_OUTPUT}"
                   echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
                   echo "release_title=${release_title}" >> "${GITHUB_OUTPUT}"
-                  node .github/scripts/release-notes.mjs desktop/changes "${release_tag}" >> "${GITHUB_OUTPUT}"
+                  node .github/scripts/release-notes.mjs desktop/changes "${previous_tag}" >> "${GITHUB_OUTPUT}"
 
     build:
         needs: build-metadata
-        if: needs.build-metadata.outputs.should_build == 'true'
         runs-on: ${{ matrix.os }}
-        environment:
-            name: production
+
+        permissions:
+            contents: write
 
         strategy:
             matrix:
-                os: [macos-latest, ubuntu-latest, windows-latest]
+                # Add macos-latest / ubuntu-latest back to build those too; the
+                # steps guarded on the runner OS below are kept for that reason.
+                os: [windows-latest]
 
         env:
             RELEASE_TAG: ${{ needs.build-metadata.outputs.release_tag }}
-            IS_RC: ${{ startsWith(github.ref_name, 'release/') }}
-            RELEASE_BODY: ${{ needs.build-metadata.outputs.release_body }}
 
         defaults:
             run:
@@ -108,6 +139,14 @@ jobs:
 
             - name: Install dependencies
               run: npm ci
+
+            # electron-builder takes the version it stamps into the installers
+            # and into latest.yml from desktop/package.json, so replace upstream's
+            # with the one build-metadata computed. Computed once there rather
+            # than here so that every runner in the matrix agrees on it.
+            - name: Set the release version
+              working-directory: ${{ github.workspace }}
+              run: node .github/scripts/photos-desktop-version.mjs set "${{ needs.build-metadata.outputs.release_version }}"
 
             - name: Setup Rust cache
               uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -138,21 +177,13 @@ jobs:
             - name: Build
               run: npm run build:ci
 
-            - name: Mint nightly token
-              id: nightly_token
-              uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-              with:
-                  client-id: ${{ secrets.ENTE_CI_GH_CLIENT_ID }}
-                  private-key: ${{ secrets.ENTE_CI_GH_APP_PRIVATE_KEY }}
-                  repositories: nightly,photos-desktop
-                  permission-contents: write
-
-            - name: Publish
+            - name: Package
               shell: bash
               run: |
                   if [ "${RUNNER_OS}" = "macOS" ]; then
-                      export CSC_LINK="${MAC_OS_CERTIFICATE}"
-                      export CSC_KEY_PASSWORD="${MAC_OS_CERTIFICATE_PASSWORD}"
+                      # There is no Apple certificate, so tell electron-builder
+                      # to skip signing rather than fail looking for an identity.
+                      export CSC_IDENTITY_AUTO_DISCOVERY=false
                   elif [ "${RUNNER_OS}" = "Linux" ]; then
                       export TARGET_CC=clang
                       export TARGET_CXX=clang++
@@ -160,68 +191,35 @@ jobs:
 
                   platform=${{ startsWith(matrix.os, 'macos') && 'mac' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }}
 
-                  if [ "${IS_RC}" = "true" ]; then
-                      npm exec -- electron-builder --$platform --publish always "-c.releaseInfo.releaseNotes=${RELEASE_BODY}"
-                  else
-                      npm exec -- electron-builder --$platform --publish never
-                  fi
+                  npm exec -- electron-builder --$platform --publish never
               env:
-                  GH_TOKEN: ${{ steps.nightly_token.outputs.token }}
-                  MAC_OS_CERTIFICATE: ${{ secrets.MAC_OS_CERTIFICATE }}
-                  MAC_OS_CERTIFICATE_PASSWORD: ${{ secrets.MAC_OS_CERTIFICATE_PASSWORD }}
-                  APPLE_ID: ${{ secrets.APPLE_ID }}
-                  APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-                  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-                  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-                  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-                  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-                  # Allow rebuilds to keep updating the rolling RC draft.
-                  EP_GH_IGNORE_TIME: true
                   # Workaround recommended in
                   # https://github.com/electron-userland/electron-builder/issues/3179
                   USE_HARD_LINKS: false
 
-            - name: Upload to nightly
+            # A workflow artifact is a single zip, expires after 30 days, and
+            # needs a GitHub login to fetch. A release gives each installer its
+            # own permanent download URL, and carries the electron-updater
+            # metadata (latest.yml, .blockmap) alongside them.
+            - name: Publish release
               uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
               with:
-                  repo: nightly
-                  token: ${{ steps.nightly_token.outputs.token }}
                   tag: ${{ env.RELEASE_TAG }}
-                  name: ${{ env.RELEASE_TAG }}
-                  body: ${{ env.RELEASE_BODY }}
-                  artifacts: "desktop/dist/ente-*.@(exe|dmg|AppImage|deb|rpm|pacman)"
-                  prerelease: true
-                  makeLatest: false
+                  commit: ${{ needs.build-metadata.outputs.commit_sha }}
+                  name: ${{ needs.build-metadata.outputs.release_title }}
+                  body: ${{ needs.build-metadata.outputs.release_body }}
+                  artifacts: "desktop/dist/ente-*.@(exe|dmg|AppImage|deb|rpm|pacman),desktop/dist/*.blockmap,desktop/dist/latest*.yml"
+                  artifactErrorsFailBuild: true
+                  # The first runner in the matrix creates the release; the rest
+                  # add to it rather than failing on an existing tag. Assets of
+                  # the same name are replaced; those from another runner OS are
+                  # left alone.
                   allowUpdates: true
-                  updateOnlyUnreleased: true
-
-    finish-build:
-        needs: [build-metadata, build]
-        if: needs.build-metadata.outputs.should_build == 'true'
-        runs-on: ubuntu-latest
-        permissions:
-            contents: write
-
-        steps:
-            - name: Checkout
-              uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-              with:
-                  ref: ${{ needs.build-metadata.outputs.commit_sha }}
-
-            - name: Point release tag at the successfully built commit
-              env:
-                  COMMIT_SHA: ${{ needs.build-metadata.outputs.commit_sha }}
-                  RELEASE_TAG: ${{ needs.build-metadata.outputs.release_tag }}
-              run: |
-                  git tag --force "${RELEASE_TAG}" "${COMMIT_SHA}"
-                  git push --force origin "refs/tags/${RELEASE_TAG}"
-
-            - name: Notify Discord
-              if: github.event_name != 'schedule' || needs.build-metadata.outputs.has_new_changes == 'true'
-              continue-on-error: true
-              env:
-                  DISCORD_WEBHOOK: ${{ secrets.DISCORD_INTERNAL_RELEASE_WEBHOOK }}
-                  RELEASE_TITLE: ${{ needs.build-metadata.outputs.release_title }}
-                  RELEASE_BODY_GROUPED: ${{ needs.build-metadata.outputs.release_body_grouped }}
-                  RELEASE_TAG: ${{ needs.build-metadata.outputs.release_tag }}
-              run: node .github/scripts/release-notify.mjs photos-desktop "${RELEASE_TAG}"
+                  # electron-updater resolves updates through GitHub's "latest
+                  # release" pointer, which a prerelease can never hold.
+                  prerelease: false
+                  makeLatest: true
+            # There is no step afterwards to move the tag onto the built commit:
+            # each build has its own tag, which the release above creates at the
+            # commit it built. Only the rolling tag of the old scheme could end
+            # up left behind on an earlier commit.
