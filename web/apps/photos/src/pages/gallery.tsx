@@ -1357,12 +1357,14 @@ const Page: React.FC = () => {
                         return;
                     }
 
-                    const ownedSelectedFiles =
-                        op == "download"
-                            ? selectedFiles
-                            : selectedFiles.filter(
-                                  (file) => file.ownerID == user!.id,
-                              );
+                    // Downloads, streamable or not, don't require ownership.
+                    const isDownloadOp =
+                        op == "download" || op == "downloadStream";
+                    const ownedSelectedFiles = isDownloadOp
+                        ? selectedFiles
+                        : selectedFiles.filter(
+                              (file) => file.ownerID == user!.id,
+                          );
                     if (ownedSelectedFiles.length > 0) {
                         await performFileOp(
                             op,
@@ -1381,7 +1383,7 @@ const Page: React.FC = () => {
                     }
 
                     if (
-                        op != "download" &&
+                        !isDownloadOp &&
                         ownedSelectedFiles.length != selectedFiles.length
                     ) {
                         showMiniDialog(notifyOthersFilesDialogAttributes());
@@ -1853,6 +1855,27 @@ const Page: React.FC = () => {
                     void createFileOpHandler("download", {
                         suppressSelectionBar,
                     })();
+                    break;
+                case "downloadStream":
+                    createFileOpHandler("downloadStream", {
+                        suppressSelectionBar,
+                    })();
+                    break;
+                case "dropOriginal":
+                    // Unlike the automatic drop after conversion, which only
+                    // runs when the stream is a lossless copy, this discards
+                    // the original whatever the stream turned out to be.
+                    showMiniDialog({
+                        title: t("delete_original_title"),
+                        message: t("delete_original_message"),
+                        continue: {
+                            text: t("delete"),
+                            color: "critical",
+                            action: createFileOpHandler("dropOriginal", {
+                                suppressSelectionBar,
+                            }),
+                        },
+                    });
                     break;
                 case "favorite":
                     void createFileOpHandler("favorite", {
@@ -2418,6 +2441,7 @@ const Page: React.FC = () => {
                             footer={fileListFooter}
                             user={user}
                             files={filteredFiles}
+                            enableViewModeToggle={true}
                             enableDownload={true}
                             disableGrouping={
                                 state.searchSuggestion?.type == "clip" ||
