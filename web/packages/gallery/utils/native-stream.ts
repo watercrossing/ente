@@ -81,6 +81,9 @@ const GenerateHLSResult = z.object({
     dimensions: z.object({ width: z.number(), height: z.number() }),
     videoSize: z.number(),
     videoObjectID: z.string(),
+    // Absent when talking to an older desktop app, which is indistinguishable
+    // here from a stream that is not a faithful copy of its original.
+    isLosslessCopy: z.boolean().optional(),
 });
 
 export type GenerateHLSResult = z.infer<typeof GenerateHLSResult>;
@@ -130,6 +133,49 @@ export const initiateGenerateHLS = async (
     if (res.status == 204) return undefined;
 
     return GenerateHLSResult.parse(await res.json());
+};
+
+/**
+ * Ask native to stitch an HLS stream back into a standalone MP4 on disk.
+ *
+ * This is only expected to be used with streams that we ourselves generated,
+ * whose playlists index into a single encrypted video and carry their key
+ * inline. Native does the reassembly with ffmpeg, copying the streams across
+ * without a re-encode.
+ *
+ * @param playlist The m3u8 playlist for the stream, retaining the relative
+ * "output.ts" URI for the video that native will write {@link video} to. The
+ * body is taken by the video, so this rides along in the URL; playlists run to
+ * tens of bytes per segment, far below what Chromium will carry there.
+ *
+ * @param video A stream of the bytes of the video that the playlist indexes
+ * into.
+ *
+ * @param outputPath Path at which to write the resultant MP4. Anything already
+ * there will be overwritten.
+ */
+export const mergeHLSStream = async (
+    _: Electron,
+    playlist: string,
+    video: ReadableStream,
+    outputPath: string,
+): Promise<void> => {
+    const params = new URLSearchParams({
+        op: "merge-hls",
+        playlist,
+        outputPath,
+    });
+
+    const url = `stream://video?${params.toString()}`;
+    const res = await fetch(url, {
+        method: "POST",
+        // Chromium requires duplex for streamed request bodies.
+        // @ts-expect-error duplex is missing from lib.dom.d.ts.
+        duplex: "half",
+        body: video,
+    });
+    if (!res.ok)
+        throw new Error(`Failed to write stream to ${url}: HTTP ${res.status}`);
 };
 
 export const readVideoStream = async (

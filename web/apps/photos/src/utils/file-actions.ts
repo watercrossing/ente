@@ -7,6 +7,8 @@ import {
 export type FileContextAction =
     | "sendLink"
     | "download"
+    | "downloadStream"
+    | "dropOriginal"
     | "fixTime"
     | "editLocation"
     | "favorite"
@@ -30,6 +32,16 @@ interface FileActionContext {
     hasOnlyOwnFiles: boolean;
     showAddPerson: boolean;
     showEditLocation: boolean;
+    /**
+     * If true, then the option to save the streamable version of the videos is
+     * offered alongside the regular download.
+     */
+    showDownloadStream?: boolean;
+    /**
+     * If true, then the option to discard the originals of the videos, keeping
+     * only their streams, is offered alongside the regular download.
+     */
+    showDropOriginal?: boolean;
 }
 
 export function getAvailableFileActions(
@@ -42,6 +54,8 @@ export function getAvailableFileActions(
         hasOnlyOwnFiles,
         showAddPerson,
         showEditLocation,
+        showDownloadStream,
+        showDropOriginal,
     } = context;
 
     const actions = getBaseActions(
@@ -54,6 +68,14 @@ export function getAvailableFileActions(
 
     if (hasOnlyOwnFiles && collectionSummary?.id !== PseudoCollectionID.trash) {
         insertSendLinkBeforeDownload(actions);
+    }
+
+    if (showDownloadStream) {
+        insertDownloadStreamAfterDownload(actions);
+    }
+
+    if (showDropOriginal && hasOnlyOwnFiles) {
+        insertDropOriginalAfterDownload(actions);
     }
 
     if (showAddPerson && collectionSummary?.id !== PseudoCollectionID.trash) {
@@ -179,6 +201,26 @@ function insertSendLinkBeforeDownload(actions: FileContextAction[]): void {
         actions.splice(downloadIndex, 0, "sendLink");
     } else {
         actions.unshift("sendLink");
+    }
+}
+
+// Only meaningful where the regular download is also offered, so tuck it in
+// next to that instead of giving it a slot of its own.
+function insertDownloadStreamAfterDownload(actions: FileContextAction[]): void {
+    const downloadIndex = actions.indexOf("download");
+    if (downloadIndex !== -1) {
+        actions.splice(downloadIndex + 1, 0, "downloadStream");
+    }
+}
+
+// Sits after the streamable download, which is what the user is left with once
+// the original is gone.
+function insertDropOriginalAfterDownload(actions: FileContextAction[]): void {
+    const afterIndex = actions.indexOf("downloadStream");
+    const downloadIndex =
+        afterIndex !== -1 ? afterIndex : actions.indexOf("download");
+    if (downloadIndex !== -1) {
+        actions.splice(downloadIndex + 1, 0, "dropOriginal");
     }
 }
 

@@ -1,6 +1,7 @@
 import { net, protocol, type BrowserWindow } from "electron/main";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import log from "./log";
@@ -9,6 +10,7 @@ import { type FFmpegGenerateHLSPlaylistAndSegmentsResult } from "./services/ffmp
 import { markClosableZip, openZip } from "./services/zip";
 import { writeStream } from "./utils/stream";
 import {
+    deleteTempDirIgnoringErrors,
     deleteTempFile,
     deleteTempFileIgnoringErrors,
     makeFileForStreamOrPathOrZipItem,
@@ -66,6 +68,8 @@ const handleStreamRequest = async (
                         return handleConvertToMP4Write(request);
                     case "generate-hls":
                         return handleGenerateHLSWrite(request, searchParams);
+                    case "merge-hls":
+                        return handleMergeHLSWrite(request, searchParams);
                     default:
                         return new Response(`Unknown op ${op}`, {
                             status: 404,
@@ -241,7 +245,13 @@ const handleGenerateHLSWrite = async (
             return new Response(null, { status: 204 });
         }
 
-        const { playlistPath, dimensions, videoSize, videoObjectID } = result;
+        const {
+            playlistPath,
+            dimensions,
+            videoSize,
+            videoObjectID,
+            isLosslessCopy,
+        } = result;
 
         const playlistToken = randomUUID();
         pendingVideoResults.set(playlistToken, playlistPath);
@@ -252,6 +262,7 @@ const handleGenerateHLSWrite = async (
                 dimensions,
                 videoSize,
                 videoObjectID,
+                isLosslessCopy,
             }),
             { status: 200 },
         );
@@ -259,4 +270,100 @@ const handleGenerateHLSWrite = async (
         if (isInputFileTemporary)
             await deleteTempFileIgnoringErrors(inputFilePath);
     }
+};
+
+/**
+ * Stitch an HLS stream back into a standalone video file at a path of the
+ * renderer's choosing.
+ *
+ * The request body is the encrypted MPEG-TS object backing the stream, and the
+ * "playlist" param is the m3u8 that indexes into it. Both are written into a
+ * temporary directory, using the names the playlist expects, before ffmpeg is
+ * asked to put them back together.
+ *
+ * Unlike the other video ops, the result is written directly to the "outputPath"
+ * the user picked instead of being handed back via a token: these files are
+ * arbitrarily large, and there is no reason to make a temporary copy of one.
+ */
+const handleMergeHLSWrite = async (
+    request: Request,
+    params: URLSearchParams,
+) => {
+    const playlist = params.get("playlist");
+    const outputPath = params.get("outputPath");
+    if (!playlist || !outputPath) throw new Error("Missing params");
+
+    const body = request.body;
+    if (!body) throw new Error("Missing body");
+
+    const worker = await ffmpegUtilityProcess();
+
+    const tempDirPath = await makeTempFilePath();
+    await fs.mkdir(tempDirPath);
+
+    // Playlists index into a video named "output.ts" alongside them (see the
+    // corresponding assumption in the web code's hlsPlaylistDataForFile).
+    const playlistPath = path.join(tempDirPath, "output.m3u8");
+    const videoPath = path.join(tempDirPath, "output.ts");
+
+    const { playlist: demuxablePlaylist, key } = detachInlineHLSKey(playlist);
+
+    let didStartMerge = false;
+    try {
+        await Promise.all([
+            fs.writeFile(playlistPath, demuxablePlaylist, { encoding: "utf8" }),
+            key
+                ? fs.writeFile(path.join(tempDirPath, hlsKeyFileName), key)
+                : Promise.resolve(),
+            writeStream(videoPath, body),
+        ]);
+
+        didStartMerge = true;
+        await worker.ffmpegMergeHLSStream(playlistPath, outputPath);
+    } catch (e) {
+        log.error("Failed to merge HLS stream", e);
+        // Don't leave a partial file behind at the path the user picked. Only
+        // ours though: until ffmpeg starts, nothing there is of our making.
+        if (didStartMerge) {
+            try {
+                await fs.rm(outputPath, { force: true });
+            } catch (e2) {
+                log.error(`Could not delete incomplete file ${outputPath}`, e2);
+            }
+        }
+        throw e;
+    } finally {
+        await deleteTempDirIgnoringErrors(tempDirPath);
+    }
+
+    return new Response("", { status: 200 });
+};
+
+const hlsKeyFileName = "output.key";
+
+const inlineHLSKeyURIRegex = /URI="data:[^;"]*;base64,([^"]+)"/g;
+
+/**
+ * Move the AES key that a playlist inlines as a data URI out into a file that
+ * sits alongside the playlist.
+ *
+ * We generate playlists with their key inlined, which is what the HLS clients
+ * we play them back with expect. ffmpeg's HLS demuxer is stricter, and will
+ * fetch keys only over file or http, so for its benefit the key gets its own
+ * file and the playlist is rewritten to point at it.
+ *
+ * Playlists which do not inline a key (or do not use one at all) are returned
+ * unchanged.
+ */
+const detachInlineHLSKey = (playlist: string) => {
+    let key: Buffer | undefined;
+    const rewritten = playlist.replaceAll(
+        inlineHLSKeyURIRegex,
+        (_, base64Key: string) => {
+            // All our segments share one key, so the first is representative.
+            key ??= Buffer.from(base64Key, "base64");
+            return `URI="${hlsKeyFileName}"`;
+        },
+    );
+    return key ? { playlist: rewritten, key } : { playlist, key };
 };
