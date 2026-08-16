@@ -48,17 +48,20 @@ function expect(label, actual, wanted) {
     if (actual !== wanted) throw new Error(`${label}: expected ${wanted}, found ${actual}`);
 }
 
+// The line break between the name and the version is matched as \s+ rather than
+// \n so that these work on a CRLF checkout too, as on a Windows runner. The
+// captured whitespace is written back unchanged, so the file keeps its endings.
 function check() {
     const version = sourceVersion();
-    expect("package-lock.json", value(files.packageLock, /"name": "ente",\n\s+"version": "([^"]+)"/), version);
-    expect('package-lock.json packages[""]', value(files.packageLock, /"": \{\n\s+"name": "ente",\n\s+"version": "([^"]+)"/), version);
+    expect("package-lock.json", value(files.packageLock, /"name": "ente",\s+"version": "([^"]+)"/), version);
+    expect('package-lock.json packages[""]', value(files.packageLock, /"": \{\s+"name": "ente",\s+"version": "([^"]+)"/), version);
 }
 
 function setVersion(version) {
     validateVersion(version);
-    replace(files.packageJson, /("name": "ente",\n\s+"version": ")[^"]+(")/, (_m, a, b) => `${a}${version}${b}`);
-    replace(files.packageLock, /("name": "ente",\n\s+"version": ")[^"]+(")/, (_m, a, b) => `${a}${version}${b}`);
-    replace(files.packageLock, /("": \{\n\s+"name": "ente",\n\s+"version": ")[^"]+(")/, (_m, a, b) => `${a}${version}${b}`);
+    replace(files.packageJson, /("name": "ente",\s+"version": ")[^"]+(")/, (_m, a, b) => `${a}${version}${b}`);
+    replace(files.packageLock, /("name": "ente",\s+"version": ")[^"]+(")/, (_m, a, b) => `${a}${version}${b}`);
+    replace(files.packageLock, /("": \{\s+"name": "ente",\s+"version": ")[^"]+(")/, (_m, a, b) => `${a}${version}${b}`);
     check();
 }
 
