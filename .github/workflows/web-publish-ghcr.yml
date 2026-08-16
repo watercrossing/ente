@@ -1,14 +1,30 @@
 name: "Publish GHCR (Web)"
 
+# As with the server image, upstream pushes this to ghcr.io/ente/web, which a
+# fork cannot write to. Build our own code into our own namespace instead.
+#
+# The image is nginx serving the static exports of the web apps. It is a
+# separate image from the server: ente-server is museum alone, and none of the
+# renderer-side changes in this fork reach a deployment without this one.
+
 on:
-    schedule:
-        # Wednesdays at 07:00 UTC
-        - cron: '0 7 * * 3'
+    push:
+        branches:
+            - main
+        paths:
+            # rust/ too: the Dockerfile compiles the wasm packages from it.
+            - "web/**"
+            - "rust/**"
+            - ".github/workflows/web-publish-ghcr.yml"
     workflow_dispatch:
 
 permissions:
     contents: read
     packages: write
+
+concurrency:
+    group: web-publish-ghcr
+    cancel-in-progress: false
 
 jobs:
     publish:
@@ -23,11 +39,18 @@ jobs:
               run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 
             - name: Build and push
+              env:
+                  # GHCR paths must be lowercase; GitHub owner names are
+                  # case-insensitive, so fold it rather than trusting the casing.
+                  IMAGE_OWNER: ${{ github.repository_owner }}
               run: |
+                  image="ghcr.io/$(printf '%s' "${IMAGE_OWNER}" | tr '[:upper:]' '[:lower:]')/ente-web"
                   docker buildx create --use
+                  # amd64 only: this image builds a Rust toolchain and eleven
+                  # Next.js apps, which is impractical to emulate for arm64.
                   docker buildx build --push \
                       --file web/Dockerfile \
-                      --platform linux/amd64,linux/arm64 \
-                      --tag ghcr.io/ente/web:${GITHUB_SHA} \
-                      --tag ghcr.io/ente/web:latest \
+                      --platform linux/amd64 \
+                      --tag "${image}:${GITHUB_SHA}" \
+                      --tag "${image}:latest" \
                       .
