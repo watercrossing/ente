@@ -1,3 +1,15 @@
+**This is a fork of [ente/ente](https://github.com/ente/ente): upstream tracking, with some local modifications.**
+
+Functional changes compared to upstream:
+
+- **Losslessly remuxed videos are stored as their HLS stream alone.** Where the stream is a faithful stand-in for the original (video and audio both copied, nothing else dropped), the original is deleted and the stream is stitched back into a file on download.
+- **Wider lossless remuxing.** SDR H.264 is remuxed regardless of bitrate, and AAC-LC audio is copied rather than re-encoded.
+- **Native video fullscreen on touch devices.** Phones and tablets get the browser's own fullscreen player, which rotates to landscape.
+
+Everything else is packaging: unsigned Windows desktop installers, and server and web images published to this fork's own GHCR namespace.
+
+---
+
 <div align="center">
 
 <img src=".github/assets/ente-rocketship.png" width="400"/>
