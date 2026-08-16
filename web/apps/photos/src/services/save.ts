@@ -1,7 +1,7 @@
 import { safeDirectoryName, safeFileName } from "@/utils/native-fs";
 import { assertionFailed } from "ente-base/assert";
 import { suppressMainWindowBlurForTrustedPrompt } from "ente-base/electron";
-import { joinPath } from "ente-base/file-name";
+import { joinPath, nameAndExtension } from "ente-base/file-name";
 import log from "ente-base/log";
 import type { Electron } from "ente-base/types/ipc";
 import type {
@@ -10,9 +10,10 @@ import type {
 } from "ente-gallery/components/utils/save-groups";
 import { downloadManager } from "ente-gallery/services/download";
 import { downloadAndSaveFilesWeb } from "ente-gallery/services/save-core";
-import { writeStream } from "ente-gallery/utils/native-stream";
-import type { EnteFile } from "ente-media/file";
-import { fileFileName } from "ente-media/file-metadata";
+import { hlsSourceForFileIfExists } from "ente-gallery/services/video";
+import { mergeHLSStream, writeStream } from "ente-gallery/utils/native-stream";
+import { fileLogID, type EnteFile } from "ente-media/file";
+import { fileFileName, isStreamOnlyVideo } from "ente-media/file-metadata";
 import { FileType } from "ente-media/file-type";
 import { decodeLivePhoto } from "ente-media/live-photo";
 
@@ -135,6 +136,142 @@ const downloadAndSave = async (
     await downloadFilesDesktop(files);
 };
 
+/**
+ * Save the streamable version of each of the given videos to a directory the
+ * user picks, stitched back into a standalone MP4.
+ *
+ * This is a desktop only operation, since the stitching is done natively by
+ * ffmpeg. Videos which do not have a stream (either because they don't need one
+ * or because one hasn't been generated yet) are counted as failures.
+ *
+ * Note that what gets saved is not the original video but the smaller,
+ * transcoded one that gets streamed during playback. So this is a way of
+ * obtaining a compact and broadly playable copy of a video without having to
+ * download the original.
+ */
+export const downloadAndSaveStreamableVideos = async (
+    files: EnteFile[],
+    title: string,
+    onAddSaveGroup: AddSaveGroup,
+) => {
+    const electron = globalThis.electron;
+    if (!electron || !files.length) {
+        assertionFailed();
+        return;
+    }
+
+    suppressMainWindowBlurForTrustedPrompt();
+    const downloadDirPath = await electron.selectDirectory();
+    if (!downloadDirPath) {
+        return;
+    }
+
+    const canceller = new AbortController();
+    const failedFiles: EnteFile[] = [];
+    let isDownloading = false;
+    let updateSaveGroup: UpdateSaveGroup = () => undefined;
+
+    const saveStreams = async (
+        filesToSave: EnteFile[],
+        resetFailedCount = false,
+    ) => {
+        if (!filesToSave.length || isDownloading) return;
+
+        isDownloading = true;
+        if (resetFailedCount) {
+            updateSaveGroup((g) => ({
+                ...g,
+                failed: 0,
+                failureReason: undefined,
+            }));
+        }
+        failedFiles.length = 0;
+
+        try {
+            for (const file of filesToSave) {
+                if (canceller.signal.aborted) break;
+                try {
+                    await saveStreamableVideoDesktop(
+                        electron,
+                        file,
+                        downloadDirPath,
+                        canceller.signal,
+                    );
+                    updateSaveGroup((g) => ({ ...g, success: g.success + 1 }));
+                } catch (e) {
+                    log.error(
+                        `Failed to save stream for ${fileLogID(file)}`,
+                        e,
+                    );
+                    failedFiles.push(file);
+                    updateSaveGroup((g) => ({
+                        ...g,
+                        failed: g.failed + 1,
+                        failureReason: g.failureReason ?? "file_error",
+                    }));
+                }
+            }
+
+            if (!failedFiles.length) {
+                updateSaveGroup((g) => ({ ...g, retry: undefined }));
+            }
+        } finally {
+            isDownloading = false;
+        }
+    };
+
+    const retry = () => {
+        if (!failedFiles.length || isDownloading || canceller.signal.aborted)
+            return;
+        void saveStreams([...failedFiles], true);
+    };
+
+    updateSaveGroup = onAddSaveGroup({
+        title,
+        downloadDirPath,
+        total: files.length,
+        includeZipNumber: false,
+        canceller,
+        retry,
+    });
+
+    await saveStreams(files);
+};
+
+const saveStreamableVideoDesktop = async (
+    electron: Electron,
+    file: EnteFile,
+    directoryPath: string,
+    signal: AbortSignal,
+) => {
+    const source = await hlsSourceForFileIfExists(file);
+    if (!source) {
+        throw new Error(`No stream exists for ${fileLogID(file)}`);
+    }
+
+    const res = await fetch(source.videoURL, { signal });
+    if (!res.ok || !res.body) {
+        throw new Error(
+            `Failed to fetch the stream for ${fileLogID(file)}: HTTP ${res.status}`,
+        );
+    }
+
+    // The stream is always an MP4-able H.264 + AAC, whatever the original was.
+    const [name] = nameAndExtension(fileFileName(file));
+    const exportName = await safeFileName(
+        directoryPath,
+        `${name}.mp4`,
+        electron.fs.exists,
+    );
+
+    await mergeHLSStream(
+        electron,
+        source.playlist,
+        res.body,
+        joinPath(directoryPath, exportName),
+    );
+};
+
 const mkdirCollectionDownloadFolder = async (
     { fs }: Electron,
     downloadDirPath: string,
@@ -158,6 +295,17 @@ const saveFileDesktop = async (
     file: EnteFile,
     directoryPath: string,
 ) => {
+    // Videos whose original was discarded can only be saved by stitching their
+    // stream back together, which is what the user gets asking to save them.
+    if (isStreamOnlyVideo(file)) {
+        return saveStreamableVideoDesktop(
+            electron,
+            file,
+            directoryPath,
+            new AbortController().signal,
+        );
+    }
+
     const fs = electron.fs;
 
     const createExportName = (fileName: string) =>
