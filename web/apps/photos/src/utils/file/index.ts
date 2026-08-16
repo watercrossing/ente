@@ -1,9 +1,13 @@
 import type { SelectionContext } from "@/components/gallery";
 import type { FileOp } from "@/components/SelectedFileOptions";
-import { downloadAndSaveFiles } from "@/services/save";
+import {
+    downloadAndSaveFiles,
+    downloadAndSaveStreamableVideos,
+} from "@/services/save";
 import { isSameDay } from "ente-base/date";
 import { formattedDate } from "ente-base/i18n-date";
 import type { AddSaveGroup } from "ente-gallery/components/utils/save-groups";
+import { dropOriginalForFile } from "ente-gallery/services/video";
 import type { EnteFile } from "ente-media/file";
 import {
     fileCreationPhotoDate,
@@ -90,6 +94,29 @@ export const performFileOp = async (
                     ? fileFileName(singleFile)
                     : t("files_count", { count: files.length });
             await downloadAndSaveFiles(files, title, onAddSaveGroup);
+            break;
+        }
+        case "downloadStream": {
+            // The menu entry is offered when the file that was right clicked is
+            // a video, but the selection it acts on can contain anything else.
+            const videos = files.filter(
+                (file) => file.metadata.fileType == FileType.video,
+            );
+            if (!videos.length) break;
+            await downloadAndSaveStreamableVideos(
+                videos,
+                t("files_count", { count: videos.length }),
+                onAddSaveGroup,
+            );
+            break;
+        }
+        case "dropOriginal": {
+            // As with downloadStream, the right clicked file is a video but the
+            // selection it acts on need not be entirely videos.
+            const videos = files.filter(
+                (file) => file.metadata.fileType == FileType.video,
+            );
+            for (const video of videos) await dropOriginalForFile(video);
             break;
         }
         case "fixTime":
