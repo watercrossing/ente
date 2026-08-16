@@ -185,6 +185,33 @@ export const fetchFilePreviewData = async (
     return z.object({ url: z.string() }).parse(await res.json()).url;
 };
 
+/**
+ * Ask remote to delete the original of each of the given videos, keeping only
+ * their HLS streams.
+ *
+ * This is irreversible from the client's point of view: afterwards the only
+ * copy of the video is its stream, and the file can only be exported by
+ * remuxing that back into a standalone file.
+ *
+ * Remote independently verifies that a usable stream exists before deleting
+ * anything, and reports back the files it declined to touch. Callers should
+ * treat a file's absence from {@link dropped} as the drop not having happened.
+ */
+export const dropVideoOriginals = async (fileIDs: number[]) => {
+    const res = await fetch(await apiURL("/files/video-data/drop-originals"), {
+        method: "POST",
+        headers: await authenticatedRequestHeaders(),
+        body: JSON.stringify({ fileIDs }),
+    });
+    ensureOk(res);
+    return DropOriginalsResponse.parse(await res.json());
+};
+
+const DropOriginalsResponse = z.object({
+    dropped: z.array(z.number()),
+    skipped: z.array(z.object({ fileID: z.number(), reason: z.string() })),
+});
+
 export const putVideoData = async (
     file: EnteFile,
     encryptedPlaylist: EncryptedBlobB64,

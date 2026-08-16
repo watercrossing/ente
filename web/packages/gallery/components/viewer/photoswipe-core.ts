@@ -604,7 +604,7 @@ export class FileViewerPhotoSwipe<
 
             const qualityMenu = container?.querySelector("#ente-quality-menu");
             if (qualityMenu instanceof MediaChromeMenu) {
-                const { videoPlaylistURL, fileID } = itemData;
+                const { videoPlaylistURL, fileID, isStreamOnly } = itemData;
 
                 const item = qualityMenu.radioGroupItems[0]!;
                 let didChangeHide = false;
@@ -616,9 +616,18 @@ export class FileViewerPhotoSwipe<
                     item.hidden = true;
                 }
 
+                // Offering the original for a video that no longer has one
+                // would be a switch that silently does nothing.
+                const originalItem = qualityMenu.radioGroupItems[1]!;
+                if (originalItem.hidden != !!isStreamOnly) {
+                    didChangeHide = true;
+                    originalItem.hidden = !!isStreamOnly;
+                }
+
                 const value =
-                    intendedVideoQualityForFileID(fileID) == "auto" &&
-                    videoPlaylistURL
+                    isStreamOnly ||
+                    (intendedVideoQualityForFileID(fileID) == "auto" &&
+                        videoPlaylistURL)
                         ? t("auto")
                         : t("original");
                 if (qualityMenu.value != value) {
