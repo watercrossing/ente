@@ -17,3 +17,30 @@ func (r VidPreviewRequest) Validate() error {
 	}
 	return nil
 }
+
+// DropOriginalRequest asks for the original objects of the given videos to be
+// deleted, keeping only their HLS streams.
+type DropOriginalRequest struct {
+	FileIDs []int64 `json:"fileIDs" binding:"required"`
+}
+
+func (r DropOriginalRequest) Validate() error {
+	if len(r.FileIDs) == 0 {
+		return ente.NewBadRequestWithMessage("fileIDs are required")
+	}
+	if len(r.FileIDs) > 200 {
+		return ente.NewBadRequestWithMessage("fileIDs should be less than or equal to 200")
+	}
+	return nil
+}
+
+// DropOriginalSkip records a file whose original was left in place, and why.
+type DropOriginalSkip struct {
+	FileID int64  `json:"fileID"`
+	Reason string `json:"reason"`
+}
+
+type DropOriginalResponse struct {
+	Dropped []int64            `json:"dropped"`
+	Skipped []DropOriginalSkip `json:"skipped"`
+}

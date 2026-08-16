@@ -60,6 +60,28 @@ func (h *FileHandler) PutVideoData(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{})
 }
 
+// DropOriginals deletes the original objects of videos whose HLS stream is a
+// lossless copy of them, keeping the stream and the thumbnail.
+func (h *FileHandler) DropOriginals(ctx *gin.Context) {
+	var req fileData.DropOriginalRequest
+	if err := handler.BindJSON(ctx, &req); err != nil {
+		logrus.WithField("req_id", requestid.Get(ctx)).WithError(err).Warn("Request binding failed")
+		handler.Error(ctx, ente.NewBadRequestWithMessage("invalid request body"))
+		return
+	}
+	if err := req.Validate(); err != nil {
+		ctx.JSON(http.StatusBadRequest, err)
+		return
+	}
+	userID := auth.GetUserID(ctx.Request.Header)
+	res, err := h.FileDataCtrl.DropOriginals(ctx, userID, req.FileIDs)
+	if err != nil {
+		handler.Error(ctx, stacktrace.Propagate(err, ""))
+		return
+	}
+	ctx.JSON(http.StatusOK, res)
+}
+
 func (h *FileHandler) GetFilesData(ctx *gin.Context) {
 	var req fileData.GetFilesData
 	if err := handler.BindJSON(ctx, &req); err != nil {
