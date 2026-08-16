@@ -1,5 +1,12 @@
 appId: io.ente.bhari-frame
 artifactName: ${productName}-${version}-${arch}.${ext}
+# Without this, the update feed is inferred from package.json's `repository`
+# (ente/photos-desktop), and these custom builds would offer the official
+# release as an "update" over themselves.
+publish:
+    provider: github
+    owner: watercrossing
+    repo: ente
 files:
     - app/**/*
     - out
@@ -14,12 +21,6 @@ win:
     target:
         - target: nsis
           arch: [x64, arm64]
-    azureSignOptions:
-        publisherName: ENTE TECHNOLOGIES, INC.
-        endpoint: https://eus.codesigning.azure.net/
-        certificateProfileName: EnteTrustCertProfile
-        codeSigningAccountName: EnteTechnologiesInc
-    signExts: [".dll", ".node"]
 nsis:
     deleteAppDataOnUninstall: true
 linux:
