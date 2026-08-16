@@ -24,13 +24,20 @@ import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import PlayCircleOutlineOutlinedIcon from "@mui/icons-material/PlayCircleOutlineOutlined";
 import { Box, Checkbox, Fab, Typography, styled } from "@mui/material";
 import type { LocalUser } from "ente-accounts/services/user";
+import { isDesktop } from "ente-base/app";
 import { assertionFailed } from "ente-base/assert";
 import { Overlay } from "ente-base/components/containers";
-import { formattedDateRelative } from "ente-base/i18n-date";
+import { formattedDateRelative, formattedTime } from "ente-base/i18n-date";
 import log from "ente-base/log";
 import { downloadManager } from "ente-gallery/services/download";
+import { formattedStorageByteSize } from "ente-gallery/utils/units";
 import type { EnteFile } from "ente-media/file";
-import { fileDurationString } from "ente-media/file-metadata";
+import {
+    fileCreationTime,
+    fileDurationString,
+    fileFileName,
+    isStreamOnlyVideo,
+} from "ente-media/file-metadata";
 import { FileType } from "ente-media/file-type";
 import {
     LoadingThumbnail,
@@ -68,6 +75,16 @@ export interface FileListHeaderOrFooter {
     height: number;
     extendToInlineEdges?: boolean;
 }
+
+/**
+ * How the files should be laid out.
+ *
+ * - "grid": The default. A grid of thumbnails, as many per row as fit.
+ *
+ * - "list": One file per row, showing its file name alongside a small
+ *   thumbnail, plus its time and size.
+ */
+export type FileListViewMode = "grid" | "list";
 
 type FileListItem =
     | {
@@ -108,6 +125,10 @@ export interface FileListProps {
     header?: FileListHeaderOrFooter;
     footer?: FileListHeaderOrFooter;
     user?: LocalUser;
+    /**
+     * The layout to use for the files. Defaults to "grid".
+     */
+    viewMode?: FileListViewMode;
     disableGrouping?: boolean;
     enableSelect?: boolean;
     setSelected: (
@@ -143,6 +164,7 @@ export const FileList: React.FC<FileListProps> = ({
     footer,
     user,
     annotatedFiles,
+    viewMode = "grid",
     disableGrouping,
     enableSelect,
     selected,
@@ -199,7 +221,22 @@ export const FileList: React.FC<FileListProps> = ({
 
         const { isSmallerLayout, columns } = layoutParams;
         const fileItemHeight = layoutParams.itemHeight + layoutParams.gap;
-        if (disableGrouping) {
+        if (viewMode == "list") {
+            // An uninterrupted list: one file per row, and no date separators
+            // breaking it up irrespective of the grouping setting.
+            items = items.concat(
+                annotatedFiles.map((annotatedFile, index) => ({
+                    height: listItemHeight,
+                    type: "file",
+                    groups: [
+                        {
+                            annotatedFiles: [annotatedFile],
+                            annotatedFilesStartIndex: index,
+                        },
+                    ],
+                })),
+            );
+        } else if (disableGrouping) {
             items = items.concat(
                 batch(annotatedFiles, columns).map(
                     (batchFiles, batchIndex) => ({
@@ -324,6 +361,7 @@ export const FileList: React.FC<FileListProps> = ({
         header,
         footer,
         annotatedFiles,
+        viewMode,
         disableGrouping,
         layoutParams,
     ]);
@@ -503,6 +541,19 @@ export const FileList: React.FC<FileListProps> = ({
             hasOnlyOwnFiles,
             showAddPerson: !!showAddPersonAction,
             showEditLocation: !!showEditLocationAction && hasOnlyOwnFiles,
+            // Stitching a stream back together needs native ffmpeg. Whether one
+            // exists for this video is only known once we ask remote, so offer
+            // it for any video and report the lack of a stream as a failure.
+            showDownloadStream:
+                isDesktop &&
+                contextMenu.file.metadata.fileType == FileType.video,
+            // Remote verifies that a usable stream exists before deleting
+            // anything, so as above this is offered for any video whose
+            // original is still around, and refusals are reported afterwards.
+            showDropOriginal:
+                isDesktop &&
+                contextMenu.file.metadata.fileType == FileType.video &&
+                !isStreamOnlyVideo(contextMenu.file),
         });
         if (!actions.includes("favorite")) return actions;
         if (favoriteCount > 0 && favoriteCount < selectionCount) {
@@ -659,6 +710,7 @@ export const FileList: React.FC<FileListProps> = ({
                                                 !!enableSelect &&
                                                 !suppressSelectionUI,
                                         }}
+                                        layout={viewMode}
                                         file={file}
                                         selected={isFileSelected(file)}
                                         selectOnClick={haveSelection}
@@ -723,12 +775,13 @@ export const FileList: React.FC<FileListProps> = ({
             selected,
             suppressSelectionUI,
             user,
+            viewMode,
         ],
     );
 
     const itemData = useMemo(
-        () => ({ items, layoutParams, renderListItem }),
-        [items, layoutParams, renderListItem],
+        () => ({ items, layoutParams, viewMode, renderListItem }),
+        [items, layoutParams, viewMode, renderListItem],
     );
 
     const itemSize = useCallback(
@@ -800,6 +853,8 @@ export const FileList: React.FC<FileListProps> = ({
             }
         }
     }
+    // Item heights change wholesale across view modes, so start afresh.
+    key = `${viewMode}-${key}`;
 
     return (
         <Box sx={{ position: "relative", width, height }}>
@@ -901,6 +956,16 @@ const GridSpanListItem = styled("div")<{ span: number }>`
 
 const dateListItemHeight = 48;
 
+/**
+ * Height of a single file's row when using the "list" view mode.
+ */
+const listItemHeight = 56;
+
+/**
+ * Side of the (square) thumbnail shown at the start of each such row.
+ */
+const listItemThumbnailSize = 44;
+
 const DateListItem = styled(GridSpanListItem)(
     ({ theme }) => `
     white-space: nowrap;
@@ -914,6 +979,7 @@ const DateListItem = styled(GridSpanListItem)(
 interface FileListItemData {
     items: FileListItem[];
     layoutParams: ThumbnailGridLayoutParams;
+    viewMode: FileListViewMode;
     renderListItem: (
         item: FileListItem,
         isScrolling: boolean,
@@ -927,11 +993,13 @@ const FileListRow = memo(
         isScrolling,
         data,
     }: ListChildComponentProps<FileListItemData>) => {
-        const { items, layoutParams, renderListItem } = data;
+        const { items, layoutParams, viewMode, renderListItem } = data;
         const { itemWidth, paddingInline, gap } = layoutParams;
 
         const item = items[index]!;
+        // List items span the full width, so they need no grid template.
         const itemSpans = (() => {
+            if (viewMode == "list") return [];
             switch (item.type) {
                 case "date":
                     return item.groups.map((g) => g.dateSpan);
@@ -967,6 +1035,7 @@ const FileListRow = memo(
 
 type FileThumbnailProps = {
     file: EnteFile;
+    layout: FileListViewMode;
     selected: boolean;
     isRangeSelectActive: boolean;
     selectOnClick: boolean;
@@ -984,6 +1053,7 @@ type FileThumbnailProps = {
 
 const FileThumbnail: React.FC<FileThumbnailProps> = ({
     file,
+    layout,
     user,
     enableSelect,
     selected,
@@ -1072,6 +1142,91 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({
         activeCollectionID == PseudoCollectionID.trash &&
         (file as EnteTrashFile).deleteBy;
 
+    const check = enableSelect && (
+        <Check
+            type="checkbox"
+            checked={selected}
+            onChange={handleSelect}
+            $active={isRangeSelectActive && isInSelectRange}
+            onClick={(e) => e.stopPropagation()}
+        />
+    );
+
+    const thumbnail = file.metadata.hasStaticThumbnail ? (
+        <StaticThumbnail fileType={file.metadata.fileType} />
+    ) : imageURL ? (
+        <img src={imageURL} />
+    ) : (
+        <LoadingThumbnail />
+    );
+
+    if (layout == "list") {
+        return (
+            <FileListItem_
+                onClick={handleClick}
+                onContextMenu={onContextMenu}
+                onMouseEnter={handleHover}
+                disabled={!imageURL}
+                $selected={selected}
+                style={style}
+                {...(enableSelect && longPressHandlers)}
+            >
+                <FileListItemThumbnail>
+                    {check}
+                    {thumbnail}
+                    {file.metadata.fileType == FileType.livePhoto ? (
+                        <FileTypeIndicatorOverlay>
+                            <AlbumOutlinedIcon fontSize="small" />
+                        </FileTypeIndicatorOverlay>
+                    ) : (
+                        file.metadata.fileType == FileType.video && (
+                            <FileTypeIndicatorOverlay>
+                                <PlayCircleOutlineOutlinedIcon fontSize="small" />
+                            </FileTypeIndicatorOverlay>
+                        )
+                    )}
+                    {selected && <SelectedOverlay />}
+                </FileListItemThumbnail>
+                <FileListItemName variant="small" noWrap>
+                    {fileFileName(file)}
+                </FileListItemName>
+                {isFav && (
+                    <FileListItemStar>
+                        <HugeiconsIcon
+                            icon={StarIcon}
+                            size={20}
+                            fill="currentColor"
+                            aria-hidden
+                        />
+                    </FileListItemStar>
+                )}
+                {shouldShowAvatar(file, user) && (
+                    <FileListItemAvatar>
+                        <Avatar {...{ user, file, emailByUserID }} />
+                    </FileListItemAvatar>
+                )}
+                <FileListItemMeta variant="mini" $width={112} $hideWhenNarrow>
+                    {deleteBy
+                        ? formattedDateRelative(deleteBy)
+                        : file.metadata.fileType == FileType.video
+                          ? fileDurationString(file)
+                          : undefined}
+                </FileListItemMeta>
+                <FileListItemMeta variant="mini" $width={72} $hideWhenNarrow>
+                    {formattedTime(new Date(fileCreationTime(file) / 1000))}
+                </FileListItemMeta>
+                <FileListItemMeta variant="mini" $width={80}>
+                    {file.info?.fileSize
+                        ? formattedStorageByteSize(file.info.fileSize)
+                        : undefined}
+                </FileListItemMeta>
+                {isRangeSelectActive && isInSelectRange && (
+                    <InSelectRangeOverlay />
+                )}
+            </FileListItem_>
+        );
+    }
+
     return (
         <FileThumbnail_
             key={`thumb-${file.id}}`}
@@ -1082,22 +1237,8 @@ const FileThumbnail: React.FC<FileThumbnailProps> = ({
             style={style}
             {...(enableSelect && longPressHandlers)}
         >
-            {enableSelect && (
-                <Check
-                    type="checkbox"
-                    checked={selected}
-                    onChange={handleSelect}
-                    $active={isRangeSelectActive && isInSelectRange}
-                    onClick={(e) => e.stopPropagation()}
-                />
-            )}
-            {file.metadata.hasStaticThumbnail ? (
-                <StaticThumbnail fileType={file.metadata.fileType} />
-            ) : imageURL ? (
-                <img src={imageURL} />
-            ) : (
-                <LoadingThumbnail />
-            )}
+            {check}
+            {thumbnail}
             {file.metadata.fileType == FileType.livePhoto ? (
                 <FileTypeIndicatorOverlay>
                     <AlbumOutlinedIcon fontSize="small" />
@@ -1305,6 +1446,94 @@ const SelectedOverlay = styled(Overlay)(
     ({ theme }) => `
     border: 2px solid ${theme.vars.palette.accent.main};
     border-radius: 4px;
+`,
+);
+
+const FileListItem_ = styled("div")<{ disabled: boolean; $selected: boolean }>(
+    ({ theme, disabled, $selected }) => `
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 100%;
+    box-sizing: border-box;
+    padding-block: ${(listItemHeight - listItemThumbnailSize) / 2}px;
+    padding-inline: 8px;
+    position: relative;
+    border-radius: 4px;
+    cursor: ${disabled ? "not-allowed" : "pointer"};
+    user-select: none;
+    background-color: ${$selected ? theme.vars.palette.fill.faint : "transparent"};
+
+    @media (pointer: fine) {
+        &:hover {
+            background-color: ${theme.vars.palette.fill.faintHover};
+
+            input[type="checkbox"] {
+                visibility: visible;
+                opacity: 0.5;
+            }
+        }
+    }
+`,
+);
+
+const FileListItemThumbnail = styled("div")`
+    position: relative;
+    display: flex;
+    flex: none;
+    width: ${listItemThumbnailSize}px;
+    height: ${listItemThumbnailSize}px;
+    overflow: hidden;
+    border-radius: 4px;
+
+    & > img {
+        object-fit: cover;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+    }
+
+    /* Outspecify the placeholder's own glyph size, which assumes a grid tile. */
+    && > div > svg {
+        font-size: 20px;
+    }
+`;
+
+const FileListItemName = styled(Typography)`
+    flex: 1;
+    min-width: 0;
+`;
+
+const FileListItemStar = styled("div")(
+    ({ theme }) => `
+    flex: none;
+    display: flex;
+    color: ${theme.vars.palette.text.faint};
+`,
+);
+
+const FileListItemAvatar = styled("div")`
+    flex: none;
+    display: flex;
+`;
+
+const FileListItemMeta = styled(Typography, {
+    shouldForwardProp: (prop) =>
+        prop !== "$width" && prop !== "$hideWhenNarrow",
+})<{ $width: number; $hideWhenNarrow?: boolean }>(
+    ({ theme, $width, $hideWhenNarrow }) => `
+    flex: none;
+    width: ${$width}px;
+    text-align: end;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: ${theme.vars.palette.text.faint};
+    ${
+        $hideWhenNarrow
+            ? `${theme.breakpoints.down("sm")} { display: none; }`
+            : ""
+    }
 `,
 );
 

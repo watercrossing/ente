@@ -41,6 +41,11 @@ export interface FFmpegUtilityProcess {
         authToken: string,
     ) => Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined>;
 
+    ffmpegMergeHLSStream: (
+        playlistFilePath: string,
+        outputFilePath: string,
+    ) => Promise<void>;
+
     ffmpegDetermineVideoDuration: (inputFilePath: string) => Promise<number>;
 }
 
@@ -55,6 +60,7 @@ process.parentPort.once("message", (e) => {
             ffmpegExec,
             ffmpegConvertToMP4,
             ffmpegGenerateHLSPlaylistAndSegments,
+            ffmpegMergeHLSStream,
             ffmpegDetermineVideoDuration,
         } satisfies FFmpegUtilityProcess,
         messagePortMainEndpoint(e.ports[0]!),
@@ -143,6 +149,15 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     dimensions: { width: number; height: number };
     videoSize: number;
     videoObjectID: string;
+    /**
+     * If true, the generated stream carries every stream of the input, with
+     * neither the video nor the audio re-encoded, and can therefore be remuxed
+     * back into a file equivalent to the original.
+     *
+     * This is what makes it safe to discard the original. It is deliberately
+     * conservative: anything we could not positively determine reads as false.
+     */
+    isLosslessCopy: boolean;
 }
 
 const ffmpegGenerateHLSPlaylistAndSegments = async (
@@ -152,18 +167,38 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     fetchURL: string,
     authToken: string,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
-    const { isH264, isAAC, isHDR, bitrate } =
-        await detectVideoCharacteristics(inputFilePath);
+    const {
+        isH264,
+        isAAC,
+        isHDR,
+        bitrate,
+        videoStreamCount,
+        audioStreamCount,
+        otherStreamCount,
+        hasDisplayMatrix,
+    } = await detectVideoCharacteristics(inputFilePath);
 
-    log.debugString(JSON.stringify({ isH264, isAAC, isHDR, bitrate }));
+    const inputVideoSize = await fs.stat(inputFilePath).then((st) => st.size);
+
+    log.info(
+        `Generate HLS for file ${fileID} | source:`,
+        [
+            `${formatBytes(inputVideoSize)}`,
+            `video ${isH264 ? "h264" : "non-h264"}${isHDR ? " HDR" : " SDR"}`,
+            `audio ${isAAC ? "aac-lc" : "non-aac-lc"}`,
+            bitrate ? `${Math.round(bitrate / 1000)} kb/s` : "bitrate unknown",
+            `streams ${videoStreamCount}v/${audioStreamCount}a/${otherStreamCount}other`,
+            hasDisplayMatrix ? "rotated" : "unrotated",
+        ].join(", "),
+    );
 
     // Never skip HEVC: it can be audio-only on Linux, and Chromium can ignore
     // iPhone HEVC+HDR rotation metadata.
     if (isH264) {
-        const inputVideoSize = await fs
-            .stat(inputFilePath)
-            .then((st) => st.size);
         if (inputVideoSize <= 10 * 1024 * 1024) {
+            log.info(
+                `Generate HLS for file ${fileID} | skipped: h264 and under 10 MB, so it can be streamed as-is`,
+            );
             return undefined;
         }
     }
@@ -179,6 +214,42 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     const rescaleVideo = !(bitrate && bitrate <= 2000 * 1000);
     // HDR needs BT.709 tonemapping; applying it to SDR reduces brightness.
     const tonemap = isHDR;
+
+    log.info(
+        `Generate HLS for file ${fileID} | plan:`,
+        [
+            reencodeVideo
+                ? `re-encode video (${isHDR ? "HDR needs BT.709 tonemapping" : "not h264"})`
+                : "copy video (SDR h264)",
+            copyAudio ? "copy audio (aac-lc)" : "re-encode audio (not aac-lc)",
+            rescaleVideo
+                ? "scale to 720p"
+                : "keep dimensions (bitrate already modest)",
+        ].join(", "),
+    );
+
+    // The stream stands in for the original only if both codecs pass through
+    // untouched and the default stream selection below has nothing to discard:
+    // one video stream, one audio stream, no subtitles or data, and no rotation
+    // that the segments cannot carry.
+    const dropOriginalBlockers = [
+        reencodeVideo && "video would be re-encoded",
+        !copyAudio && "audio would be re-encoded",
+        videoStreamCount != 1 && `${videoStreamCount} video streams, want 1`,
+        audioStreamCount != 1 && `${audioStreamCount} audio streams, want 1`,
+        otherStreamCount != 0 &&
+            `${otherStreamCount} subtitle/data streams would be dropped`,
+        hasDisplayMatrix && "rotation metadata would not survive MPEG-TS",
+    ].filter((x) => typeof x == "string");
+
+    const isLosslessCopy = dropOriginalBlockers.length == 0;
+
+    log.info(
+        `Generate HLS for file ${fileID} | original is`,
+        isLosslessCopy
+            ? "redundant: the stream is a lossless copy of it"
+            : `retained: ${dropOriginalBlockers.join("; ")}`,
+    );
 
     await fs.mkdir(outputPathPrefix);
 
@@ -267,6 +338,15 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
 
         videoSize = await fs.stat(videoPath).then((st) => st.size);
 
+        log.info(
+            `Generate HLS for file ${fileID} | result:`,
+            [
+                `${dimensions.width}x${dimensions.height}`,
+                `${formatBytes(videoSize)} from ${formatBytes(inputVideoSize)}`,
+                `${Math.round((videoSize / inputVideoSize) * 100)}% of the original`,
+            ].join(", "),
+        );
+
         videoObjectID = await uploadVideoSegments(
             videoPath,
             videoSize,
@@ -289,7 +369,69 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         ]);
     }
 
-    return { playlistPath, dimensions, videoSize, videoObjectID };
+    return {
+        playlistPath,
+        dimensions,
+        videoSize,
+        videoObjectID,
+        isLosslessCopy,
+    };
+};
+
+/**
+ * Stitch an HLS stream back into a standalone MP4.
+ *
+ * This is the inverse of {@link ffmpegGenerateHLSPlaylistAndSegments}, and
+ * expects the same shape of input that it produces: a playlist whose segments
+ * are byte ranges into a single AES-128 encrypted MPEG-TS file sitting next to
+ * it.
+ *
+ * FFmpeg's HLS demuxer already knows how to reassemble and decrypt all that, so
+ * the streams themselves are copied across without a re-encode. The result is
+ * the same 720p-ish video that would've been streamed, just in a single file
+ * that arbitrary players understand.
+ *
+ * @param playlistFilePath Path to the m3u8 playlist. Both the video it refers
+ * to and its key must be resolvable relative to it (in particular, the demuxer
+ * will not fetch a key inlined as a "data:" URI, only file and http ones).
+ *
+ * @param outputFilePath Path to write the resultant MP4 to.
+ */
+const ffmpegMergeHLSStream = async (
+    playlistFilePath: string,
+    outputFilePath: string,
+): Promise<void> => {
+    const command = [
+        ffmpegBinaryPath(),
+        ["-hide_banner"],
+        // Everything the demuxer needs is a local file alongside the playlist.
+        ["-protocol_whitelist", "file,crypto"],
+        // The demuxer otherwise refuses to open the key, whose extension is not
+        // one it recognizes as a multimedia one. We're only pointing it at a
+        // playlist we just wrote ourselves, into a directory of our own.
+        ["-allowed_extensions", "ALL"],
+        ["-i", playlistFilePath],
+        // The MP4 muxer adds the aac_adtstoasc bitstream filter itself, so the
+        // AAC frames the segments carry need no special handling here.
+        ["-c", "copy"],
+        // exec provides no stdin, so an overwrite prompt would hang us.
+        "-y",
+        outputFilePath,
+    ].flat();
+
+    await execAsyncWorker(command);
+};
+
+// Log sizes at a glance; exactness is the byte counts' job, not this one's.
+const formatBytes = (n: number) => {
+    const units = ["B", "KB", "MB", "GB"];
+    let i = 0;
+    let v = n;
+    while (v >= 1024 && i < units.length - 1) {
+        v /= 1024;
+        i++;
+    }
+    return `${i == 0 ? v : v.toFixed(1)} ${units[i]}`;
 };
 
 const deletePathIgnoringErrors = async (tempFilePath: string) => {
@@ -306,6 +448,19 @@ const videoStreamLinesRegex = /Stream #.+: Video:(.+)\r?\n/g;
 
 const audioStreamLinesRegex = /Stream #.+: Audio:(.+)\r?\n/g;
 
+// Anything that is not video or audio: subtitles, data, attachments, timecode.
+// FFmpeg's default stream selection drops all of these.
+const otherStreamLinesRegex =
+    /Stream #.+: (?!Video:|Audio:)(Subtitle|Data|Attachment):/g;
+
+// Rotation lives in the MP4 display matrix, which MPEG-TS cannot carry.
+const displayMatrixRegex = /displaymatrix: rotation of/;
+
+// FFmpeg dumps the streams of its own output after one of these lines, and the
+// null output we probe with always has a video stream of its own. Only the
+// input dump above them describes the file, so the counts come from it alone.
+const inputSectionEndRegex = /^(?:Stream mapping:|Output #)/m;
+
 const videoBitrateRegex = / ([1-9]\d*) kb\/s/;
 
 // Leading nonzero digits avoid matching hexadecimal constants in stream info.
@@ -316,6 +471,18 @@ interface VideoCharacteristics {
     isAAC: boolean;
     isHDR: boolean;
     bitrate: number | undefined;
+    videoStreamCount: number;
+    audioStreamCount: number;
+    /**
+     * The count of streams that are neither video nor audio, and which the
+     * generated stream would therefore silently drop.
+     */
+    otherStreamCount: number;
+    /**
+     * If true, the video carries rotation metadata that would not survive a
+     * round trip through the MPEG-TS segments.
+     */
+    hasDisplayMatrix: boolean;
 }
 
 // We do not bundle ffprobe, so this parses ffmpeg stderr. Failed parses fall
@@ -329,18 +496,40 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
         isAAC: false,
         isHDR: false,
         bitrate: undefined,
+        // A failed parse leaves these at zero, which reads as ineligible for
+        // the lossless copy below rather than as a video with no extra streams.
+        videoStreamCount: 0,
+        audioStreamCount: 0,
+        otherStreamCount: 0,
+        hasDisplayMatrix: false,
     };
+
+    // A missing sentinel leaves the whole string, which can only overcount and
+    // so keeps the original.
+    const inputInfo = videoInfo.slice(
+        0,
+        inputSectionEndRegex.exec(videoInfo)?.index,
+    );
 
     // FFmpeg selects the "best" audio stream, not necessarily the first one,
     // so only claim AAC when every candidate is AAC-LC. Other profiles
     // (HE-AAC, xHE-AAC) are printed as e.g. "aac (HE-AAC)" and are not
     // dependably playable, so they are excluded too.
     const audioStreamLines = Array.from(
-        videoInfo.matchAll(audioStreamLinesRegex),
+        inputInfo.matchAll(audioStreamLinesRegex),
     ).map((m) => m[1]!.trim());
     res.isAAC =
         audioStreamLines.length > 0 &&
         audioStreamLines.every((line) => line.startsWith("aac (LC)"));
+
+    res.audioStreamCount = audioStreamLines.length;
+    res.videoStreamCount = Array.from(
+        inputInfo.matchAll(videoStreamLinesRegex),
+    ).length;
+    res.otherStreamCount = Array.from(
+        inputInfo.matchAll(otherStreamLinesRegex),
+    ).length;
+    res.hasDisplayMatrix = displayMatrixRegex.test(inputInfo);
 
     if (!videoStreamLine) return res;
 
