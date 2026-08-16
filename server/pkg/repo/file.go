@@ -790,6 +790,98 @@ func convertRowsToFiles(rows *sql.Rows) ([]ente.File, error) {
 	return files, nil
 }
 
+// DropOriginal deletes the original object of a file, keeping the file itself,
+// its thumbnail, and its derived data (in particular its video preview) intact.
+//
+// It is the counterpart of scheduleDeletion for a single object rather than a
+// whole file: the object key is soft deleted and queued, so the bytes survive
+// in the bucket for the DeleteObjectQueue delay before actually going away.
+//
+// The caller is responsible for having established that the file is one whose
+// original is recoverable from its preview.
+func (repo *FileRepository) DropOriginal(ctx context.Context, fileID int64, userID int64) error {
+	tx, err := repo.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return stacktrace.Propagate(err, "")
+	}
+
+	var objectKey string
+	var fileSize int64
+	err = tx.QueryRowContext(ctx, `SELECT object_key, size FROM object_keys
+			WHERE file_id = $1 AND o_type = $2 AND is_deleted = false FOR UPDATE`,
+		fileID, ente.FILE).Scan(&objectKey, &fileSize)
+	if err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			// Already dropped. Treat as success so that a client retrying a
+			// partially applied batch converges instead of erroring forever.
+			return nil
+		}
+		return stacktrace.Propagate(err, "")
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE object_keys SET is_deleted = TRUE
+			WHERE file_id = $1 AND o_type = $2`, fileID, ente.FILE)
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+
+	err = repo.QueueRepo.AddItems(ctx, tx, RemoveComplianceHoldQueue, []string{objectKey})
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+
+	err = repo.QueueRepo.AddItems(ctx, tx, DeleteObjectQueue, []string{objectKey})
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+
+	_, err = repo.updateUsage(ctx, tx, userID, -fileSize)
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+
+	// Let other clients notice that this file's original is gone.
+	updationTime := time.Microseconds()
+	_, err = tx.ExecContext(ctx, `UPDATE files SET updation_time = $1 WHERE file_id = $2`,
+		updationTime, fileID)
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+
+	updatedRows, err := tx.QueryContext(ctx, `UPDATE collection_files
+			SET updation_time = $1 WHERE file_id = $2 RETURNING collection_id`,
+		updationTime, fileID)
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+	defer updatedRows.Close()
+	updatedCIDs := make([]int64, 0)
+	for updatedRows.Next() {
+		var cID int64
+		if err := updatedRows.Scan(&cID); err != nil {
+			tx.Rollback()
+			return stacktrace.Propagate(err, "")
+		}
+		updatedCIDs = append(updatedCIDs, cID)
+	}
+
+	_, err = tx.ExecContext(ctx, `UPDATE collections SET updation_time = $1
+			WHERE collection_id = ANY($2)`, updationTime, pq.Array(updatedCIDs))
+	if err != nil {
+		tx.Rollback()
+		return stacktrace.Propagate(err, "")
+	}
+
+	return stacktrace.Propagate(tx.Commit(), "")
+}
+
 func (repo *FileRepository) scheduleDeletion(ctx context.Context, tx *sql.Tx, fileIDs []int64, userID int64) error {
 	diff := int64(0)
 

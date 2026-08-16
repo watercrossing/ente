@@ -45,6 +45,26 @@ export const deleteTempFileIgnoringErrors = async (tempFilePath: string) => {
     }
 };
 
+/**
+ * Variant of {@link deleteTempFileIgnoringErrors} for a temporary directory,
+ * deleting it along with everything within it.
+ */
+export const deleteTempDirIgnoringErrors = async (tempDirPath: string) => {
+    try {
+        const tempDir = await enteTempDirPath();
+        if (!tempDirPath.startsWith(tempDir))
+            throw new Error(
+                `Attempting to delete a non-temp directory ${tempDirPath}`,
+            );
+        await fs.rm(tempDirPath, { recursive: true, force: true });
+    } catch (e) {
+        log.error(
+            `Could not delete temporary directory at path ${tempDirPath}`,
+            e,
+        );
+    }
+};
+
 interface FileForStreamOrPathOrZipItem {
     path: string;
     isFileTemporary: boolean;

@@ -14,6 +14,7 @@ import {
     Time04Icon,
     Unarchive03Icon,
     UserAdd02Icon,
+    Video01Icon,
     ViewIcon,
     ViewOffSlashIcon,
 } from "@hugeicons/core-free-icons";
@@ -54,6 +55,14 @@ const hugeIcon = (icon: IconSvgElement, size = 20) => (
 const actionConfigs: Record<FileContextAction, ActionConfig> = {
     sendLink: { label: "Send link", Icon: hugeIcon(Navigation03Icon) },
     download: { label: "download", Icon: hugeIcon(Download01Icon) },
+    downloadStream: {
+        label: "download_streamable_video",
+        Icon: hugeIcon(Video01Icon),
+    },
+    dropOriginal: {
+        label: "delete_original_keep_stream",
+        Icon: hugeIcon(Delete02Icon),
+    },
     fixTime: { label: "fix_creation_time", Icon: hugeIcon(Time04Icon) },
     editLocation: { label: "edit_location", Icon: hugeIcon(Location01Icon) },
     favorite: { label: "favorite", Icon: <StarBorderIcon fontSize="small" /> },
