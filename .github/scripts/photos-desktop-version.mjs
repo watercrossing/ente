@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertLocalBuildNumber } from "./photos-desktop-calver.mjs";
 
 const root = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -76,6 +77,7 @@ function check() {
 
 function setVersion(version) {
     validateVersion(version);
+    assertLocalBuildNumber(version);
     replace(
         files.packageJson,
         /("name": "ente",\s+"version": ")[^"]+(")/,
