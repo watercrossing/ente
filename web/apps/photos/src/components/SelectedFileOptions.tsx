@@ -55,6 +55,11 @@ const selectionActionGap = 4;
 export type FileOp =
     | "sendLink"
     | "download"
+    // Save the streamable version of the selected videos (desktop only).
+    | "downloadStream"
+    // Discard the originals of the selected videos, keeping their streams
+    // (desktop only).
+    | "dropOriginal"
     | "fixTime"
     | "favorite"
     | "unfavorite"
@@ -63,6 +68,12 @@ export type FileOp =
     | "hide"
     | "trash"
     | "deletePermanently";
+
+/** The file actions that this bar can show (the rest are context menu only). */
+type ToolbarAction = Exclude<
+    FileContextAction,
+    "downloadStream" | "dropOriginal"
+>;
 
 export type CollectionOp = "add" | "move" | "restore" | "unhide";
 
@@ -244,7 +255,9 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
         hasOnlyOwnFiles,
         showAddPerson: !!onShowAssignPersonDialog,
         showEditLocation: !!onEditLocation && hasOnlyOwnFiles,
-    }).flatMap((action): FileContextAction[] => {
+    }).flatMap((action): ToolbarAction[] => {
+        // Offered only from the context menu, not from this bar.
+        if (action === "downloadStream" || action === "dropOriginal") return [];
         if (action !== "favorite" && action !== "unfavorite") return [action];
         return favoriteAction === "none" ? [] : [favoriteAction];
     });
@@ -324,7 +337,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
             onClick: onShowAssignPersonDialog,
         },
     } satisfies Record<
-        FileContextAction,
+        ToolbarAction,
         Omit<SelectionAction, "id" | "destructive">
     >;
     const actions = toolbarActions.map((id): SelectionAction => ({

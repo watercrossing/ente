@@ -200,12 +200,14 @@ export const useSelectedFileOperations = ({
                         return;
                     }
 
-                    const ownedSelectedFiles =
-                        op == "download"
-                            ? selectedFiles
-                            : selectedFiles.filter(
-                                  (file) => file.ownerID == user!.id,
-                              );
+                    // Downloads, streamable or not, don't require ownership.
+                    const isDownloadOp =
+                        op == "download" || op == "downloadStream";
+                    const ownedSelectedFiles = isDownloadOp
+                        ? selectedFiles
+                        : selectedFiles.filter(
+                              (file) => file.ownerID == user!.id,
+                          );
                     if (ownedSelectedFiles.length > 0) {
                         await performFileOp(
                             op,
@@ -224,7 +226,7 @@ export const useSelectedFileOperations = ({
                     }
 
                     if (
-                        op != "download" &&
+                        !isDownloadOp &&
                         ownedSelectedFiles.length != selectedFiles.length
                     ) {
                         showMiniDialog(notifyOthersFilesDialogAttributes());

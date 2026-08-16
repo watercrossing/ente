@@ -2,8 +2,11 @@ import type { PublicAlbumsCredentials } from "ente-base/http";
 import log from "ente-base/log";
 import type { RenderableSourceURLs } from "ente-gallery/services/download-core";
 import type { RawExifTags } from "ente-gallery/services/exif";
-import type { EnteFile } from "ente-media/file";
-import type { ParsedMetadata } from "ente-media/file-metadata";
+import { fileLogID, type EnteFile } from "ente-media/file";
+import {
+    isStreamOnlyVideo,
+    type ParsedMetadata,
+} from "ente-media/file-metadata";
 import { FileType } from "ente-media/file-type";
 import { ensureString } from "ente-utils/ensure";
 
@@ -22,6 +25,11 @@ export type ItemData = PhotoSwipeSlideData & {
     originalImageBlob?: Blob;
     videoURL?: string;
     videoPlaylistURL?: string;
+    /**
+     * If true, this video has no original to offer as an alternative to its
+     * stream, because the original was deleted as redundant.
+     */
+    isStreamOnly?: boolean;
     mediaControllerID?: string;
     isContentLoading?: boolean;
     isContentZoomable?: boolean;
@@ -218,7 +226,13 @@ export const createFileViewerDataSource = ({
                     height,
                 } = hlsPlaylistData;
                 update(
-                    { ...videoURLD, videoPlaylistURL, width, height },
+                    {
+                        ...videoURLD,
+                        videoPlaylistURL,
+                        width,
+                        height,
+                        isStreamOnly: isStreamOnlyVideo(file),
+                    },
                     createHLSPlaylistItemDataValidity(),
                 );
             } else {
@@ -266,11 +280,21 @@ export const createFileViewerDataSource = ({
                     file,
                     downloadManager.publicAlbumsCredentials,
                 );
+                // A video whose original was deleted has no "original quality"
+                // to switch to, and nothing to fall back to below.
+                const streamOnly = isStreamOnlyVideo(file);
                 if (
                     typeof hlsPlaylistData == "object" &&
-                    opts?.videoQuality != "original"
+                    (streamOnly || opts?.videoQuality != "original")
                 ) {
                     updateVideo(undefined, hlsPlaylistData);
+                    return;
+                }
+                if (streamOnly) {
+                    log.error(
+                        `Cannot render ${fileLogID(file)}: it is stream-only, but its stream could not be resolved`,
+                    );
+                    markFailed();
                     return;
                 }
             }

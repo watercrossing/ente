@@ -233,6 +233,7 @@ const GalleryMediaContent = ({
                 onAddPhotos={onAddPhotos}
                 suppressEmptyState={suppressEmptyState}
                 footer={footer}
+                enableViewModeToggle
                 enableDownload
                 enableSelect
                 isInIncomingSharedCollection={source.activeCollectionSummary?.attributes.has(
