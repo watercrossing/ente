@@ -1,9 +1,16 @@
 name: "Publish GHCR (Server)"
 
+# Upstream builds whatever commit api.ente.com reports as live and pushes it to
+# ghcr.io/ente/server. In this fork we want our own code, and we can only write
+# to our own package namespace, so both of those are changed below.
+
 on:
-    schedule:
-        # Monthly on the 15th at ~10:30 AM IST
-        - cron: '0 5 15 * *'
+    push:
+        branches:
+            - main
+        paths:
+            - "server/**"
+            - ".github/workflows/server-publish-ghcr.yml"
     workflow_dispatch:
 
 permissions:
@@ -11,30 +18,16 @@ permissions:
     contents: read
     packages: write
 
+concurrency:
+    group: server-publish-ghcr
+    cancel-in-progress: false
+
 jobs:
     publish:
         runs-on: ubuntu-latest
         steps:
-            - name: Determine commit from prod museum
-              env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  museum_commit="$(curl -s https://api.ente.com/ping | jq -r .id)"
-                  [[ "${museum_commit}" =~ ^[0-9a-f]{40}$ ]]
-                  [[ "$(gh run list \
-                      --repo "${GITHUB_REPOSITORY}" \
-                      --workflow server-release.yml \
-                      --commit "${museum_commit}" \
-                      --status success \
-                      --limit 1 \
-                      --json databaseId \
-                      --jq length)" -gt 0 ]]
-                  echo "museum_commit=${museum_commit}" >> $GITHUB_ENV
-
-            - name: Checkout prod museum commit
+            - name: Checkout
               uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-              with:
-                  ref: ${{ env.museum_commit }}
 
             - name: Log in to GHCR
               env:
@@ -42,12 +35,17 @@ jobs:
               run: printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 
             - name: Build and push
+              env:
+                  # GHCR paths must be lowercase; GitHub owner names are
+                  # case-insensitive, so fold it rather than trusting the casing.
+                  IMAGE_OWNER: ${{ github.repository_owner }}
               run: |
+                  image="ghcr.io/$(printf '%s' "${IMAGE_OWNER}" | tr '[:upper:]' '[:lower:]')/ente-server"
                   docker buildx create --use
                   docker buildx build --push \
                       --file server/Dockerfile \
                       --platform linux/amd64,linux/arm64 \
-                      --build-arg GIT_COMMIT="${museum_commit}" \
-                      --tag ghcr.io/ente/server:${museum_commit} \
-                      --tag ghcr.io/ente/server:latest \
+                      --build-arg GIT_COMMIT="${GITHUB_SHA}" \
+                      --tag "${image}:${GITHUB_SHA}" \
+                      --tag "${image}:latest" \
                       server
