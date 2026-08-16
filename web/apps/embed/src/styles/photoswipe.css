@@ -225,15 +225,19 @@
     height: 100%;
 }
 
-.pswp-ente media-controller.ente-vanilla-video {
+/*
+ * Media Chrome shrink-wraps the media it holds, so without this a video would
+ * keep its intrinsic size instead of filling the slide PhotoSwipe sized for it.
+ */
+.pswp-ente media-controller {
     width: 100%;
     height: 100%;
+}
 
-    video {
-        /* The one-pixel inset prevents fractional-size flicker in Chrome. HLS video does not need it. */
-        width: calc(100% - 1px);
-        height: calc(100% - 1px);
-    }
+.pswp-ente media-controller.ente-vanilla-video video {
+    /* The one-pixel inset prevents fractional-size flicker in Chrome. HLS video does not need it. */
+    width: calc(100% - 1px);
+    height: calc(100% - 1px);
 }
 
 .pswp-ente .pswp__media-controls {
