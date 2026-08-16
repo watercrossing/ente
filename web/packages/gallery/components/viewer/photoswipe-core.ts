@@ -129,6 +129,9 @@ export class FileViewerPhotoSwipe<
         onDownload,
         onMore,
     }: FileViewerPhotoSwipeCoreOptions<T>) {
+        const asItemData = (slideData: SlideData | undefined) =>
+            slideData! as ItemData;
+
         const pswp = new PhotoSwipe({
             bgOpacity: 1,
             showHideAnimationType: "fade",
@@ -140,6 +143,22 @@ export class FileViewerPhotoSwipe<
             pinchToClose: !disableGestureClose,
             closeOnVerticalDrag: !disableGestureClose,
             wheelToZoom: true,
+            // PhotoSwipe never scales a slide past 1x, which is right for a
+            // photo but leaves a video letterboxed: our streams cap at 720p, so
+            // on a larger screen one would sit in the middle of the viewport
+            // with black bars on all four sides. Videos are meant to be scaled,
+            // so fit them to the viewport in both directions instead.
+            initialZoomLevel: ({ itemData, elementSize, panAreaSize, fit }) => {
+                if (asItemData(itemData).fileType != FileType.video) return fit;
+                // A video whose dimensions we do not know yet keeps
+                // PhotoSwipe's own fallback, which is the viewport size.
+                if (!elementSize?.x || !elementSize.y || !panAreaSize)
+                    return fit;
+                return Math.min(
+                    panAreaSize.x / elementSize.x,
+                    panAreaSize.y / elementSize.y,
+                );
+            },
             // PhotoSwipe's focus trap conflicts with MUI drawers and fast swipes.
             trapFocus: false,
             index: initialIndex,
@@ -156,9 +175,6 @@ export class FileViewerPhotoSwipe<
         this.pswp = pswp;
 
         let _currentAnnotatedFile: T | undefined;
-
-        const asItemData = (slideData: SlideData | undefined) =>
-            slideData! as ItemData;
 
         const currSlideData = () => asItemData(pswp.currSlide?.data);
 
