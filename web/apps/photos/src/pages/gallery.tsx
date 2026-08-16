@@ -1159,12 +1159,14 @@ const Page: React.FC = () => {
                         return;
                     }
 
-                    const ownedSelectedFiles =
-                        op == "download"
-                            ? selectedFiles
-                            : selectedFiles.filter(
-                                  (file) => file.ownerID == user!.id,
-                              );
+                    // Downloads, streamable or not, don't require ownership.
+                    const isDownloadOp =
+                        op == "download" || op == "downloadStream";
+                    const ownedSelectedFiles = isDownloadOp
+                        ? selectedFiles
+                        : selectedFiles.filter(
+                              (file) => file.ownerID == user!.id,
+                          );
                     if (ownedSelectedFiles.length > 0) {
                         await performFileOp(
                             op,
@@ -1183,7 +1185,7 @@ const Page: React.FC = () => {
                     }
 
                     if (
-                        op != "download" &&
+                        !isDownloadOp &&
                         ownedSelectedFiles.length != selectedFiles.length
                     ) {
                         showMiniDialog(notifyOthersFilesDialogAttributes());
@@ -1536,6 +1538,16 @@ const Page: React.FC = () => {
                     break;
                 case "download":
                     createFileOpHandler("download", { suppressSelectionBar })();
+                    break;
+                case "downloadStream":
+                    createFileOpHandler("downloadStream", {
+                        suppressSelectionBar,
+                    })();
+                    break;
+                case "dropOriginal":
+                    createFileOpHandler("dropOriginal", {
+                        suppressSelectionBar,
+                    })();
                     break;
                 case "favorite":
                     createFileOpHandler("favorite", { suppressSelectionBar })();
@@ -2008,6 +2020,7 @@ const Page: React.FC = () => {
                     user={user}
                     files={filteredFiles}
                     onShowMap={handleShowCollectionMap}
+                    enableViewModeToggle={true}
                     enableDownload={true}
                     disableGrouping={state.searchSuggestion?.type == "clip"}
                     enableSelect={true}

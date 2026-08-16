@@ -29,6 +29,7 @@ import {
 } from "../utils/native-stream";
 import { downloadManager, isNetworkDownloadError } from "./download";
 import {
+    dropVideoOriginals,
     fetchFileData,
     fetchFilePreviewData,
     putVideoData,
@@ -145,11 +146,28 @@ export interface HLSPlaylistData {
 // "skip" is stable ineligibility; undefined may become a playlist later.
 export type HLSPlaylistDataForFile = HLSPlaylistData | "skip" | undefined;
 
-export const hlsPlaylistDataForFile = async (
+/**
+ * The constituents of the HLS stream for a file, as they are stored remotely.
+ */
+export interface HLSSource {
+    /**
+     * The playlist, retaining the relative "output.ts" URI that stands in for
+     * the video it indexes into.
+     */
+    playlist: string;
+    /**
+     * A (temporary, pre-signed) URL from which that video can be fetched.
+     */
+    videoURL: string;
+    width: number;
+    height: number;
+}
+
+const hlsSourceForFile = async (
     file: EnteFile,
     publicAlbumsCredentials?: PublicAlbumsCredentials,
     publicMemoryCredentials?: PublicMemoryCredentials,
-): Promise<HLSPlaylistDataForFile> => {
+): Promise<HLSSource | "skip" | undefined> => {
     ensurePrecondition(file.metadata.fileType == FileType.video);
 
     if (file.pubMagicMetadata?.data.sv == 1) {
@@ -164,12 +182,10 @@ export const hlsPlaylistDataForFile = async (
     );
     if (!playlistFileData) return undefined;
 
-    const {
-        type,
-        playlist: playlistTemplate,
-        width,
-        height,
-    } = await decryptPlaylistJSON(playlistFileData, file);
+    const { type, playlist, width, height } = await decryptPlaylistJSON(
+        playlistFileData,
+        file,
+    );
 
     if (type != "hls_video") return undefined;
 
@@ -180,6 +196,23 @@ export const hlsPlaylistDataForFile = async (
         publicMemoryCredentials,
     );
     if (!videoURL) return undefined;
+
+    return { playlist, videoURL, width, height };
+};
+
+export const hlsPlaylistDataForFile = async (
+    file: EnteFile,
+    publicAlbumsCredentials?: PublicAlbumsCredentials,
+    publicMemoryCredentials?: PublicMemoryCredentials,
+): Promise<HLSPlaylistDataForFile> => {
+    const source = await hlsSourceForFile(
+        file,
+        publicAlbumsCredentials,
+        publicMemoryCredentials,
+    );
+    if (!source || source == "skip") return source;
+
+    const { playlist: playlistTemplate, videoURL, width, height } = source;
 
     // Native playlists use this placeholder for the signed range-request URL.
     const playlist = playlistTemplate.replaceAll(
@@ -193,6 +226,24 @@ export const hlsPlaylistDataForFile = async (
     );
 
     return { playlistURL, width, height };
+};
+
+/**
+ * Fetch the pieces needed to reassemble the HLS stream for {@link file} into a
+ * standalone video file.
+ *
+ * Returns undefined if the file has no stream, either because it does not need
+ * one or because one has not been generated for it (yet).
+ *
+ * Unlike {@link hlsPlaylistDataForFile}, the playlist is returned as stored,
+ * still referring to its video by the relative "output.ts" URI, since the
+ * consumer here is expected to place that video alongside it.
+ */
+export const hlsSourceForFileIfExists = async (
+    file: EnteFile,
+): Promise<HLSSource | undefined> => {
+    const source = await hlsSourceForFile(file);
+    return source == "skip" ? undefined : source;
 };
 
 const PlaylistJSON = z.object({
@@ -395,7 +446,10 @@ const backfillQueue = async (
                 f.ownerID == userID &&
                 f.metadata.fileType == FileType.video &&
                 !localTrashFileIDs.has(f.id) &&
-                f.pubMagicMetadata?.data.sv != 1,
+                f.pubMagicMetadata?.data.sv != 1 &&
+                // Its stream is all that is left of it; there is no original to
+                // regenerate one from.
+                f.pubMagicMetadata?.data.so != 1,
         ),
     );
 
@@ -472,7 +526,13 @@ const processQueueItem = async ({
         return;
     }
 
-    const { playlistToken, dimensions, videoSize, videoObjectID } = res;
+    const {
+        playlistToken,
+        dimensions,
+        videoSize,
+        videoObjectID,
+        isLosslessCopy,
+    } = res;
     try {
         const playlist = await readVideoStream(electron, playlistToken).then(
             (res) => res.text(),
@@ -500,8 +560,64 @@ const processQueueItem = async ({
         }
 
         log.info(`Generate HLS for ${fileLogID(file)} | done`);
+
+        if (isLosslessCopy) {
+            await dropOriginalForFile(file);
+        } else {
+            // Native logged the specific reasons when it made this call.
+            log.info(
+                `Drop original for ${fileLogID(file)} | skipped: the stream is not a lossless copy of the original`,
+            );
+        }
     } finally {
         await videoStreamDone(electron, playlistToken);
+    }
+};
+
+/**
+ * Delete the original of {@link file}, leaving only its HLS stream.
+ *
+ * Remote is asked to delete first, and only then is the file marked stream-only
+ * so that clients stop reaching for an original that is no longer there. The
+ * marker cannot be written first and rolled back on refusal, because magic
+ * metadata updates are version checked and the rollback would be rejected,
+ * leaving the file permanently claiming to be something it is not.
+ *
+ * That leaves a brief window in which the original is gone but the file does
+ * not say so. Playback is unaffected during it, since a video with a stream is
+ * played from that stream regardless; a save started within it fails visibly
+ * rather than quietly producing the wrong bytes. Running this again repairs the
+ * state, as remote treats an already dropped original as success.
+ *
+ * Failures are logged and swallowed. The caller has already done the work that
+ * matters, which is generating the stream.
+ */
+export const dropOriginalForFile = async (file: EnteFile) => {
+    if (file.pubMagicMetadata?.data.so == 1) {
+        log.info(
+            `Drop original for ${fileLogID(file)} | skipped: already stream-only`,
+        );
+        return;
+    }
+
+    try {
+        const { dropped, skipped } = await dropVideoOriginals([file.id]);
+
+        if (!dropped.includes(file.id)) {
+            const reason =
+                skipped.find((s) => s.fileID == file.id)?.reason ??
+                "remote neither dropped nor reported it";
+            log.warn(
+                `Drop original for ${fileLogID(file)} | refused: ${reason}`,
+            );
+            return;
+        }
+
+        await updateFilePublicMagicMetadata(file, { so: 1 });
+
+        log.info(`Drop original for ${fileLogID(file)} | done`);
+    } catch (e) {
+        log.error(`Drop original for ${fileLogID(file)} | failed`, e);
     }
 };
 

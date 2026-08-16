@@ -37,6 +37,11 @@ import { t } from "i18next";
 export type FileOp =
     | "sendLink"
     | "download"
+    // Save the streamable version of the selected videos (desktop only).
+    | "downloadStream"
+    // Discard the originals of the selected videos, keeping their streams
+    // (desktop only).
+    | "dropOriginal"
     | "fixTime"
     | "favorite"
     | "unfavorite"
@@ -238,6 +243,10 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                 return <SendLinkButton key={action} onClick={handleSendLink} />;
             case "download":
                 return <DownloadButton key={action} onClick={handleDownload} />;
+            case "downloadStream":
+            case "dropOriginal":
+                // Offered only from the context menu, not from this bar.
+                return null;
             case "fixTime":
                 return <FixTimeButton key={action} onClick={handleFixTime} />;
             case "editLocation":

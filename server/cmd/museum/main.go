@@ -619,6 +619,7 @@ func main() {
 
 	storageAPI.PUT("/files/data", fileHandler.PutFileData)
 	storageAPI.PUT("/files/video-data", fileHandler.PutVideoData)
+	storageAPI.POST("/files/video-data/drop-originals", fileHandler.DropOriginals)
 	storageAPI.POST("/files/data/status-diff", fileHandler.FileDataStatusDiff)
 	storageAPI.POST("/files/data/fetch", fileHandler.GetFilesData)
 	storageAPI.GET("/files/data/fetch", fileHandler.GetFileData)
