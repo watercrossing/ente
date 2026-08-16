@@ -230,6 +230,7 @@ const GalleryMediaContent = ({
                 enableDateScrubber={enableDateScrubber}
                 onAddPhotos={onAddPhotos}
                 footer={footer}
+                enableViewModeToggle
                 enableDownload
                 enableSelect
                 isInIncomingSharedCollection={source.activeCollectionSummary?.attributes.has(
