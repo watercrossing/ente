@@ -1,0 +1,9 @@
+# Chromecast browsers don't support the reference-types WASM proposal. The flag
+# lives here, rather than as a CARGO_ENCODED_RUSTFLAGS prefix on the npm script
+# that runs wasm-pack, because cmd.exe (which npm uses on Windows) cannot parse
+# a POSIX env-var assignment prefix. Cargo reads this because wasm-pack is
+# always invoked with this directory as the working directory, which is also
+# what picks up the nightly pin in rust-toolchain.toml.
+
+[build]
+rustflags = ["-Ctarget-feature=-reference-types"]
